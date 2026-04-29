@@ -1,0 +1,6 @@
+{
+  "name": "Unidex Pro ERP",
+  "description": "Comprehensive business management suite with Quick Bill POS, GST Invoicing, Inventory Tracking, and Party Ledger.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": []
+}
