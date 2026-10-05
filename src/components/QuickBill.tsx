@@ -17,7 +17,9 @@ import {
   Wallet,
   Coins,
   Layers,
-  IndianRupee
+  IndianRupee,
+  Sparkles,
+  Barcode
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { BarcodeCameraModal } from './BarcodeCameraModal';
@@ -39,6 +41,12 @@ export default function QuickBill() {
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'upi' | 'card' | 'credit' | 'split' | null>(null);
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
+
+  const filteredProducts = products.filter(p => 
+    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (p.barcode && p.barcode.includes(searchTerm)) ||
+    p.id.toLowerCase().includes(searchTerm.toLowerCase())
+  );
   const [settings, setSettings] = useState<any>(null);
   const [activeReceipt, setActiveReceipt] = useState<ReceiptData | null>(null);
 
@@ -51,6 +59,8 @@ export default function QuickBill() {
   const [quickAddBarcode, setQuickAddBarcode] = useState('');
   const [quickAddInitialData, setQuickAddInitialData] = useState<any>(null);
   const [isLookingUpBarcode, setIsLookingUpBarcode] = useState(false);
+  const [liveLookupResult, setLiveLookupResult] = useState<any>(null);
+  const [isLiveLookingUp, setIsLiveLookingUp] = useState(false);
   const [scanNotification, setScanNotification] = useState<{ message: string; type: 'success' | 'alert' | 'info' } | null>(null);
 
   // Multi-tender split state
@@ -95,6 +105,83 @@ export default function QuickBill() {
     fetch('/api/products')
       .then(res => res.json())
       .then(data => setProducts(data));
+  };
+
+    // As-you-type debounced lookup for numbers / unmapped barcodes entered into search
+  useEffect(() => {
+    const trimmed = searchTerm.trim();
+    if (trimmed.length < 3 || filteredProducts.length > 0) {
+      setLiveLookupResult(null);
+      setIsLiveLookingUp(false);
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      try {
+        setIsLiveLookingUp(true);
+        const headers = {};
+        if (token) headers['Authorization'] = 'Bearer ' + token;
+
+        const res = await fetch('/api/barcode/lookup/' + encodeURIComponent(trimmed), { headers });
+        const data = await res.json();
+        setLiveLookupResult(data);
+      } catch (err) {
+        setLiveLookupResult({ found: false, source: 'none', barcode: trimmed });
+      } finally {
+        setIsLiveLookingUp(false);
+      }
+    }, 280);
+
+    return () => clearTimeout(timer);
+  }, [searchTerm, filteredProducts.length, token]);
+
+  const handleDirectAddFromMaster = async (productData: any) => {
+    try {
+      setLoading(true);
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+
+      const sellPrice = Number(productData.sellPrice || productData.mrp || 0);
+      if (sellPrice <= 0) {
+        setQuickAddBarcode(productData.barcode || searchTerm.trim());
+        setQuickAddInitialData(productData);
+        setQuickAddModalOpen(true);
+        return;
+      }
+
+      const res = await fetch('/api/products/quick-add', { 
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: productData.name,
+          brand: productData.brand || '',
+          barcode: productData.barcode || searchTerm.trim(),
+          sellPrice,
+          mrp: Number(productData.mrp || sellPrice),
+          costPrice: Number(productData.costPrice || Math.round(sellPrice * 0.8)),
+          hsnCode: productData.hsnCode || '1905',
+          gstRate: productData.gstRate !== undefined ? productData.gstRate : 18,
+          category: productData.category || 'General',
+          stock: 10,
+          image: productData.image || ''
+        })
+      });
+
+      const saved = await res.json();
+      if (!res.ok) throw new Error(saved.error || 'Failed to add product');
+
+      playScanSuccessSound();
+      setSearchTerm('');
+      setLiveLookupResult(null);
+      fetchProducts();
+      addToCart(saved);
+      setScanNotification({ message: 'Added to bill: ' + saved.name, type: 'success' });
+      setTimeout(() => setScanNotification(null), 2500);
+    } catch (err) {
+      alert(err.message);
+    } finally {
+      setLoading(false);
+    }
   };
 
   // Hybrid Barcode Scanner Engine: Local Products -> Local Offline Master -> Open Food Facts API
@@ -397,11 +484,11 @@ export default function QuickBill() {
     }
   };
 
-  const filteredProducts = products.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
-    (p.barcode && p.barcode.includes(searchTerm)) ||
-    p.id.toLowerCase().includes(searchTerm.toLowerCase())
-  );
+  // duplicate filteredProducts removed
+  //  p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+  //  (p.barcode && p.barcode.includes(searchTerm)) ||
+  //  p.id.toLowerCase().includes(searchTerm.toLowerCase())
+  // );
 
   return (
     <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-8 xl:h-[calc(100vh-160px)] min-h-0">
@@ -477,6 +564,103 @@ export default function QuickBill() {
             <span className="text-[10px] font-black uppercase tracking-widest hidden sm:block">Scan</span>
           </button>
         </div>
+
+                {/* Live Barcode / Number Below Barcode Match Card (When no active store product matches) */}
+        {searchTerm.trim().length >= 2 && filteredProducts.length === 0 && (
+          <div className="bg-white dark:bg-[#111111] border border-blue-500/30 rounded-3xl p-5 shadow-lg space-y-4">
+            {isLiveLookingUp ? (
+              <div className="flex items-center gap-3 text-slate-500 dark:text-gray-400 py-3">
+                <div className="w-5 h-5 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
+                <span className="text-xs font-bold">
+                  Searching 10,000+ FMCG master items & Open Food Facts for "{searchTerm}"...
+                </span>
+              </div>
+            ) : liveLookupResult?.found && liveLookupResult?.product ? (
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 flex items-center justify-center font-bold text-lg border border-emerald-500/20 shrink-0">
+                    <Sparkles size={24} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-950/70 text-emerald-700 dark:text-emerald-300">
+                        {liveLookupResult.source === 'open_food_facts' ? 'Open Food Facts Match' : 'Master Catalog Match'}
+                      </span>
+                      <span className="text-xs font-mono text-slate-400">
+                        Code: {liveLookupResult.product.barcode || searchTerm}
+                      </span>
+                    </div>
+                    <h4 className="text-base font-bold text-slate-900 dark:text-white mt-1">
+                      {liveLookupResult.product.name}
+                    </h4>
+                    <p className="text-xs text-slate-500 dark:text-gray-400 mt-0.5">
+                      {liveLookupResult.product.brand ? liveLookupResult.product.brand + ' • ' : ''}
+                      HSN: {liveLookupResult.product.hsnCode || '1905'} • GST: {liveLookupResult.product.gstRate ?? 18}%
+                      {liveLookupResult.product.mrp > 0 ? ' • MRP: ₹' + liveLookupResult.product.mrp : ''}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleDirectAddFromMaster(liveLookupResult.product)}
+                    className="px-6 py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl font-bold text-xs uppercase tracking-wider shadow-lg shadow-emerald-600/30 transition-all flex items-center gap-2 cursor-pointer"
+                  >
+                    <Plus size={16} /> Quick-Add & Bill {liveLookupResult.product.mrp > 0 ? '(₹' + liveLookupResult.product.mrp + ')' : ''} (Enter)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setQuickAddBarcode(liveLookupResult.product.barcode || searchTerm.trim());
+                      setQuickAddInitialData(liveLookupResult.product);
+                      setQuickAddModalOpen(true);
+                    }}
+                    className="px-4 py-3.5 bg-slate-100 dark:bg-[#1E1E1E] text-slate-700 dark:text-gray-300 hover:bg-slate-200 dark:hover:bg-[#252525] rounded-2xl font-bold text-xs transition-colors cursor-pointer"
+                  >
+                    Edit Details
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 py-1">
+                <div className="flex items-center gap-4">
+                  <div className="w-12 h-12 rounded-2xl bg-amber-500/10 text-amber-600 dark:text-amber-400 flex items-center justify-center shrink-0 border border-amber-500/20">
+                    <Barcode size={24} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-950/70 text-amber-700 dark:text-amber-300">
+                        Uncataloged Barcode / Item
+                      </span>
+                      <span className="text-xs font-mono font-bold text-slate-700 dark:text-gray-300">
+                        "{searchTerm}"
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-500 dark:text-gray-400 mt-1">
+                      This item is not yet in your inventory. Add it once to bill now and save forever.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const code = searchTerm.trim();
+                      setQuickAddBarcode(code);
+                      setQuickAddInitialData({ barcode: code, name: '', source: 'none' });
+                      setQuickAddModalOpen(true);
+                    }}
+                    className="px-6 py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl font-bold text-xs uppercase tracking-wider shadow-lg shadow-blue-600/30 transition-all flex items-center gap-2 cursor-pointer"
+                  >
+                    <Plus size={16} /> Register & Add to Bill (Enter)
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Product Grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-3 gap-4 overflow-y-auto pr-2 custom-scrollbar pb-8">

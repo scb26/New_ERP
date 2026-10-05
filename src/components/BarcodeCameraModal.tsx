@@ -8,11 +8,10 @@ import {
   Sparkles, 
   Barcode, 
   Keyboard, 
-  ArrowRight,
-  CheckCircle2
+  ArrowRight
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import { playScanSuccessSound, playScanAlertSound } from '../utils/audio';
+import { playScanSuccessSound } from '../utils/audio';
 
 interface BarcodeCameraModalProps {
   isOpen: boolean;
@@ -36,11 +35,10 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState('');
-  const [fileProcessing, setFileProcessing] = useState(false);
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Initialize and start camera
+  // Initialize and start camera (Full canvas 100% field of view, no alignment bounding box required)
   useEffect(() => {
     if (!isOpen) return;
 
@@ -73,16 +71,11 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         });
         scannerRef.current = html5QrCode;
 
+        // Omit qrbox to scan the full camera canvas without requiring exact box alignment
         const config = {
-          fps: 15,
-          qrbox: (viewfinderWidth: number, viewfinderHeight: number) => {
-            // Wide rectangular targeting box suited for 1D retail barcodes
-            return {
-              width: Math.floor(Math.min(viewfinderWidth * 0.88, 380)),
-              height: Math.floor(Math.min(viewfinderHeight * 0.45, 160))
-            };
-          },
-          aspectRatio: 1.333333
+          fps: 20,
+          aspectRatio: 1.333333,
+          disableFlip: false
         };
 
         await html5QrCode.start(
@@ -98,7 +91,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
             }
           },
           () => {
-            // Frame scan failure ignored
+            // Frame parse failure silently ignored
           }
         );
 
@@ -111,7 +104,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         setCameraError(
           err?.message?.includes('Permission') 
             ? "Camera permission denied. Please allow camera access in browser settings."
-            : "No active camera found or webcam stream unavailable. You can upload an image or type the barcode below."
+            : "No active webcam stream available. You can type the numbers printed below the barcode or upload an image."
         );
       }
     };
@@ -152,7 +145,6 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     if (!file) return;
 
     try {
-      setFileProcessing(true);
       const html5QrCode = scannerRef.current || new Html5Qrcode("interactive-barcode-viewfinder", {
         formatsToSupport: [
           Html5QrcodeSupportedFormats.EAN_13,
@@ -173,10 +165,9 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         onScan(clean);
         onClose();
       }
-    } catch (err: any) {
+    } catch {
       alert("Could not detect a clear barcode in this photo. Please ensure good lighting or type the code.");
     } finally {
-      setFileProcessing(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
@@ -214,7 +205,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   Omni Barcode Scanner
                 </h3>
                 <p className="text-xs text-slate-500 dark:text-gray-400">
-                  EAN-13, UPC, Code 128 & QR Codes supported
+                  Full-canvas auto-detection & manual digits entry
                 </p>
               </div>
             </div>
@@ -227,19 +218,56 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
             </button>
           </div>
 
-          <div className="p-6 space-y-5">
-            {/* Camera Viewfinder Box */}
+          <div className="p-6 space-y-4">
+            {/* Direct Input for numbers printed below barcode */}
+            <form onSubmit={handleManualSubmit} className="space-y-1.5 bg-blue-50/70 dark:bg-blue-950/20 p-3.5 rounded-2xl border border-blue-200/70 dark:border-blue-900/40">
+              <div className="flex items-center justify-between">
+                <label className="text-[11px] font-black uppercase tracking-wider text-blue-700 dark:text-blue-300 flex items-center gap-1.5">
+                  <Keyboard size={14} /> Type / Paste Number Below Barcode
+                </label>
+                <span className="text-[10px] text-slate-400 font-mono">e.g. 8901719101037</span>
+              </div>
+              <div className="flex gap-2">
+                <div className="relative flex-1">
+                  <Barcode size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={manualCode}
+                    onChange={(e) => setManualCode(e.target.value)}
+                    placeholder="Enter printed digits under barcode..."
+                    className="w-full pl-10 pr-4 py-2.5 bg-white dark:bg-[#1A1A1A] border border-slate-200 dark:border-white/10 rounded-xl text-xs font-mono font-bold outline-none focus:border-blue-500 text-slate-900 dark:text-white"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={manualCode.trim().length < 3}
+                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 cursor-pointer flex items-center gap-1.5 shadow-md shadow-blue-600/20 shrink-0"
+                >
+                  <ArrowRight size={14} /> Find & Add
+                </button>
+              </div>
+            </form>
+
+            {/* Camera Viewfinder Box (100% Full-Canvas Auto Detection) */}
             <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden bg-slate-900 border border-slate-200 dark:border-white/10 flex items-center justify-center shadow-inner">
               <div id="interactive-barcode-viewfinder" className="w-full h-full object-cover"></div>
 
-              {/* Animated Target Laser Overlay when camera is active */}
+              {/* Full-viewfinder Active Laser & Auto-Detection Status */}
               {cameraActive && (
-                <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-6">
-                  <div className="w-full max-w-[340px] h-[120px] border-2 border-dashed border-blue-400/80 rounded-2xl relative flex items-center justify-center shadow-[0_0_20px_rgba(59,130,246,0.3)]">
-                    {/* Laser line moving vertically */}
-                    <div className="absolute left-2 right-2 h-0.5 bg-red-500 shadow-[0_0_8px_#ef4444] animate-pulse"></div>
-                    <span className="text-[10px] font-black uppercase tracking-widest text-white/90 bg-black/60 px-2 py-0.5 rounded-md backdrop-blur-xs">
-                      Align Barcode Here
+                <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 bg-black/75 px-3 py-1 rounded-full border border-emerald-500/30 backdrop-blur-xs flex items-center gap-1.5">
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                      Auto-Scanning Entire Frame
+                    </span>
+                    <span className="text-[10px] font-bold text-white/80 bg-black/60 px-2 py-0.5 rounded-md backdrop-blur-xs">
+                      No alignment needed
+                    </span>
+                  </div>
+                  <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-red-500 to-transparent shadow-[0_0_12px_#ef4444] animate-pulse"></div>
+                  <div className="text-center">
+                    <span className="text-[10px] text-white/70 bg-black/70 px-3 py-1 rounded-full backdrop-blur-xs">
+                      Hold barcode anywhere in front of camera
                     </span>
                   </div>
                 </div>
@@ -269,32 +297,6 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               className="hidden" 
               onChange={handleImageUpload} 
             />
-
-            {/* Manual Type / Paste Barcode Form */}
-            <form onSubmit={handleManualSubmit} className="space-y-1.5">
-              <label className="block text-[10px] font-black uppercase tracking-wider text-slate-500 dark:text-gray-400">
-                Or Type / Paste Barcode Number
-              </label>
-              <div className="flex gap-2">
-                <div className="relative flex-1">
-                  <Barcode size={18} className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <input
-                    type="text"
-                    value={manualCode}
-                    onChange={(e) => setManualCode(e.target.value)}
-                    placeholder="Enter EAN (e.g. 8901719101037)"
-                    className="w-full pl-10 pr-4 py-2.5 bg-slate-50 dark:bg-[#1A1A1A] border border-slate-200 dark:border-white/10 rounded-2xl text-xs font-mono font-bold outline-none focus:border-blue-500 text-slate-900 dark:text-white"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={manualCode.trim().length < 3}
-                  className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl text-xs font-bold uppercase tracking-wider transition-all disabled:opacity-40 cursor-pointer flex items-center gap-1.5 shadow-md shadow-blue-600/20"
-                >
-                  <ArrowRight size={14} /> Scan
-                </button>
-              </div>
-            </form>
 
             {/* 1-Click Test Simulator for QA & Testing */}
             <div className="pt-3 border-t border-slate-100 dark:border-white/5 space-y-2">
