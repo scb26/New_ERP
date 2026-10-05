@@ -206,14 +206,24 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         video: {
           deviceId: hasExactId ? { exact: deviceIdToUse } : undefined,
           facingMode: hasExactId ? undefined : { ideal: 'environment' },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 }
+          width: { ideal: 1280, max: 1920 },
+          height: { ideal: 720, max: 1080 }
         },
         audio: false
       };
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       currentStreamRef.current = stream;
+
+      try {
+        const track = stream.getVideoTracks()[0];
+        if (track && typeof track.applyConstraints === 'function') {
+          // @ts-ignore
+          await track.applyConstraints({
+            advanced: [{ focusMode: 'continuous', exposureMode: 'continuous' } as any]
+          }).catch(() => {});
+        }
+      } catch {}
 
       inspectTorchCapability(stream);
 
@@ -238,15 +248,15 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
       setActiveEngine('native');
       setCameraError(null);
 
-      // Fast RAF detection loop
+      // Fast RAF detection loop with 30 FPS non-blocking throttle for instant lock-on
       let frames = 0;
       let lastFpsCheck = performance.now();
+      let lastScanTime = 0;
       let detecting = false;
 
       const loop = async () => {
         if (isStoppingRef.current || scanSuccessLockRef.current) return;
 
-        frames++;
         const now = performance.now();
         if (now - lastFpsCheck >= 1000) {
           setFpsCounter(frames);
@@ -254,8 +264,10 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           lastFpsCheck = now;
         }
 
-        if (!detecting && video.readyState >= 2) {
+        if (!detecting && video.readyState >= 2 && (now - lastScanTime >= 35)) {
           detecting = true;
+          lastScanTime = now;
+          frames++;
           try {
             const barcodes = await detector.detect(video);
             if (barcodes && barcodes.length > 0 && !scanSuccessLockRef.current) {

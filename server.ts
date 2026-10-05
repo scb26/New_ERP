@@ -699,7 +699,81 @@ async function startServer() {
     }
   });
 
-  // --- BARCODE LOOKUP ENGINE (Hybrid: Local Products -> Local Master -> Open Food Facts) ---
+  // --- REAL-TIME PRICE ESTIMATOR & FETCHER FOR UNCATALOGED BARCODES ---
+async function fetchPriceForProduct(name: string, brand: string, code: string, category: string): Promise<{ mrp: number; costPrice: number }> {
+  // 1. Try Open Prices API
+  try {
+    const pController = new AbortController();
+    const pTimer = setTimeout(() => pController.abort(), 1800);
+    const pRes = await fetch(`https://prices.openfoodfacts.org/api/v1/prices?product_code=${encodeURIComponent(code)}`, {
+      signal: pController.signal
+    });
+    clearTimeout(pTimer);
+    if (pRes.ok) {
+      const pData = await pRes.json() as any;
+      if (pData.items && pData.items.length > 0) {
+        const first = pData.items[0];
+        const rawPrice = Number(first.price);
+        if (rawPrice > 0) {
+          const currency = (first.currency || 'INR').toUpperCase();
+          let inr = rawPrice;
+          if (currency === 'EUR') inr = Math.round(rawPrice * 92);
+          else if (currency === 'USD') inr = Math.round(rawPrice * 86);
+          else if (currency === 'GBP') inr = Math.round(rawPrice * 110);
+          else inr = Math.round(rawPrice);
+
+          if (inr > 5) {
+            return { mrp: inr, costPrice: Math.round(inr * 0.8) };
+          }
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 2. Try DuckDuckGo Indian Web Search for real retail MRP
+  try {
+    const queryStr = `${brand ? brand + ' ' : ''}${name} price in india mrp`.trim();
+    const sController = new AbortController();
+    const sTimer = setTimeout(() => sController.abort(), 2000);
+    const sRes = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(queryStr)}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      signal: sController.signal
+    });
+    clearTimeout(sTimer);
+    if (sRes.ok) {
+      const html = await sRes.text();
+      const regex = /(?:MRP|Price|Rs\.?|₹)\s*:?\s*(?:Rs\.?|₹)?\s*([0-9]{2,5}(?:\.[0-9]{2})?)/gi;
+      const candidates: number[] = [];
+      let match;
+      while ((match = regex.exec(html)) !== null) {
+        const val = parseFloat(match[1]);
+        if (val >= 10 && val <= 25000) candidates.push(val);
+      }
+      if (candidates.length > 0) {
+        candidates.sort((a, b) => a - b);
+        const median = candidates[Math.floor(candidates.length / 2)];
+        if (median > 5) {
+          const mrp = Math.round(median);
+          return { mrp, costPrice: Math.round(mrp * 0.8) };
+        }
+      }
+    }
+  } catch (_) {}
+
+  // 3. Fallback: Category-based reasonable baseline price (never 0!)
+  const combined = `${name || ''} ${category || ''}`.toLowerCase();
+  let defaultPrice = 50;
+  if (combined.includes('biscuit') || combined.includes('snack') || combined.includes('noodle')) defaultPrice = 25;
+  else if (combined.includes('chocolate') || combined.includes('butter') || combined.includes('spread') || combined.includes('cheese')) defaultPrice = 120;
+  else if (combined.includes('shampoo') || combined.includes('cream') || combined.includes('lotion')) defaultPrice = 150;
+  else if (combined.includes('oil') || combined.includes('ghee') || combined.includes('atta') || combined.includes('rice')) defaultPrice = 180;
+  else if (combined.includes('soap') || combined.includes('detergent') || combined.includes('paste')) defaultPrice = 45;
+  else if (combined.includes('drink') || combined.includes('juice') || combined.includes('soda')) defaultPrice = 40;
+
+  return { mrp: defaultPrice, costPrice: Math.round(defaultPrice * 0.8) };
+}
+
+// --- BARCODE LOOKUP ENGINE (Hybrid: Local Products -> Local Master -> Open Food Facts) ---
 
   // GET /api/barcode/lookup/:code
   app.get("/api/barcode/lookup/:code", async (req: any, res) => {
@@ -729,6 +803,18 @@ async function startServer() {
       `).get(code) as any;
 
       if (masterRow) {
+        let currentMrp = Number(masterRow.default_mrp || 0);
+        let currentCost = Number(masterRow.default_cost || 0);
+
+        if (currentMrp <= 0) {
+          const fetchedPrice = await fetchPriceForProduct(masterRow.name, masterRow.brand || '', code, masterRow.category || '');
+          currentMrp = fetchedPrice.mrp;
+          currentCost = fetchedPrice.costPrice;
+          db.prepare(`
+            UPDATE barcode_master SET default_mrp = ?, default_cost = ?, updated_at = ? WHERE barcode = ?
+          `).run(currentMrp, currentCost, new Date().toISOString(), code);
+        }
+
         return res.json({
           status: 'in_master',
           found: true,
@@ -739,10 +825,10 @@ async function startServer() {
             barcode: masterRow.barcode,
             brand: masterRow.brand || '',
             category: masterRow.category || 'General',
-            mrp: Number(masterRow.default_mrp || 0),
-            sellPrice: Number(masterRow.default_mrp || 0),
-            costPrice: Number(masterRow.default_cost || 0),
-            hsnCode: masterRow.default_hsn || '',
+            mrp: currentMrp,
+            sellPrice: currentMrp,
+            costPrice: currentCost,
+            hsnCode: masterRow.default_hsn || '1905',
             gstRate: Number(masterRow.default_gst ?? 18),
             stock: 10,
             image: masterRow.image_url || ''
@@ -781,13 +867,16 @@ async function startServer() {
               inferredGst = 18;
             }
 
-            // SIMULTANEOUSLY save to local SQLite barcode_master so future lookups are 0ms offline!
+            // Fetch real market price from Open Prices or Indian web search
+            const fetchedPrice = await fetchPriceForProduct(name, brand, code, category);
             const nowIso = new Date().toISOString();
+
+            // SIMULTANEOUSLY save to local SQLite barcode_master with real price so future lookups are 0ms offline!
             db.prepare(`
               INSERT OR REPLACE INTO barcode_master (
                 barcode, name, brand, category, default_mrp, default_cost, default_hsn, default_gst, source, image_url, created_at, updated_at
-              ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, 'open_food_facts', ?, ?, ?)
-            `).run(code, name, brand, category, '1905', inferredGst, image, nowIso, nowIso);
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open_food_facts', ?, ?, ?)
+            `).run(code, name, brand, category, fetchedPrice.mrp, fetchedPrice.costPrice, '1905', inferredGst, image, nowIso, nowIso);
 
             return res.json({
               status: 'in_master',
@@ -799,9 +888,9 @@ async function startServer() {
                 barcode: code,
                 brand,
                 category,
-                mrp: 0,
-                sellPrice: 0,
-                costPrice: 0,
+                mrp: fetchedPrice.mrp,
+                sellPrice: fetchedPrice.mrp,
+                costPrice: fetchedPrice.costPrice,
                 hsnCode: '1905',
                 gstRate: inferredGst,
                 stock: 10,
