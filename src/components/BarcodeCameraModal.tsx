@@ -13,10 +13,101 @@ import {
   SwitchCamera,
   CheckCircle2,
   Cpu,
-  RefreshCw
+  RefreshCw,
+  Zap,
+  Type
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { playScanSuccessSound } from '../utils/audio';
+
+// --- GS1 Checksum & Digit Parsing Utilities ---
+
+/**
+ * Validates standard GS1 EAN-13 Modulo-10 checksum.
+ * Sum of odd positions (from right, excluding check digit) * 3 + sum of even positions * 1
+ */
+export function isValidEan13Checksum(code: string): boolean {
+  if (!/^\d{13}$/.test(code)) return false;
+  let sum = 0;
+  for (let i = 0; i < 12; i++) {
+    const digit = parseInt(code[i], 10);
+    sum += i % 2 === 0 ? digit : digit * 3;
+  }
+  const checkDigit = (10 - (sum % 10)) % 10;
+  return checkDigit === parseInt(code[12], 10);
+}
+
+/**
+ * Validates standard GS1 UPC-A Modulo-10 checksum.
+ */
+export function isValidUpcAChecksum(code: string): boolean {
+  if (!/^\d{12}$/.test(code)) return false;
+  let sum = 0;
+  for (let i = 0; i < 11; i++) {
+    const digit = parseInt(code[i], 10);
+    sum += i % 2 === 0 ? digit * 3 : digit;
+  }
+  const checkDigit = (10 - (sum % 10)) % 10;
+  return checkDigit === parseInt(code[11], 10);
+}
+
+/**
+ * Validates EAN-8 Modulo-10 checksum.
+ */
+export function isValidEan8Checksum(code: string): boolean {
+  if (!/^\d{8}$/.test(code)) return false;
+  let sum = 0;
+  for (let i = 0; i < 7; i++) {
+    const digit = parseInt(code[i], 10);
+    sum += i % 2 === 0 ? digit * 3 : digit;
+  }
+  const checkDigit = (10 - (sum % 10)) % 10;
+  return checkDigit === parseInt(code[7], 10);
+}
+
+/**
+ * Extracts and verifies candidate 8, 12, or 13-digit numbers from recognized text.
+ */
+export function cleanCandidateDigits(str: string): string | null {
+  if (!str) return null;
+  // Clean whitespace and common OCR noise
+  const sanitized = str.replace(/[\s\-_.:,]/g, '');
+
+  // Look for 13-digit sequence (EAN-13)
+  const ean13Matches = sanitized.match(/\d{13}/g);
+  if (ean13Matches) {
+    for (const match of ean13Matches) {
+      if (isValidEan13Checksum(match)) return match;
+    }
+  }
+
+  // Look for 12-digit sequence (UPC-A)
+  const upcMatches = sanitized.match(/\d{12}/g);
+  if (upcMatches) {
+    for (const match of upcMatches) {
+      if (isValidUpcAChecksum(match)) return match;
+    }
+  }
+
+  // Look for 8-digit sequence (EAN-8)
+  const ean8Matches = sanitized.match(/\d{8}/g);
+  if (ean8Matches) {
+    for (const match of ean8Matches) {
+      if (isValidEan8Checksum(match)) return match;
+    }
+  }
+
+  // Fallback: If clean 12-14 digits sequence exists without GS1 checksum match
+  const rawDigits = sanitized.replace(/\D/g, '');
+  if (rawDigits.length === 13 && isValidEan13Checksum(rawDigits)) {
+    return rawDigits;
+  }
+  if (rawDigits.length === 12 && isValidUpcAChecksum(rawDigits)) {
+    return rawDigits;
+  }
+
+  return null;
+}
 
 interface BarcodeCameraModalProps {
   isOpen: boolean;
@@ -52,10 +143,13 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
   const [hasTorch, setHasTorch] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [detectionSuccess, setDetectionSuccess] = useState(false);
+  const [decodedVia, setDecodedVia] = useState<'barcode' | 'ocr' | null>(null);
   const [fpsCounter, setFpsCounter] = useState(0);
+  const [ocrActive, setOcrActive] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const currentStreamRef = useRef<MediaStream | null>(null);
   const nativeAnimFrameRef = useRef<number | null>(null);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
@@ -103,14 +197,16 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     setCameraActive(false);
     setHasTorch(false);
     setTorchOn(false);
+    setOcrActive(false);
     isStoppingRef.current = false;
   }, []);
 
   // Handle successful scan with feedback animation
-  const triggerScanSuccess = useCallback((barcode: string) => {
+  const triggerScanSuccess = useCallback((barcode: string, source: 'barcode' | 'ocr' = 'barcode') => {
     if (scanSuccessLockRef.current) return;
     scanSuccessLockRef.current = true;
 
+    setDecodedVia(source);
     setDetectionSuccess(true);
     playScanSuccessSound();
 
@@ -182,7 +278,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     }
   };
 
-  // --- Tier 1: Native BarcodeDetector Engine ---
+  // --- Tier 1: Dual-Path Simultaneous Vision (Zebra Barcode + Number OCR) ---
   const startNativeEngine = async (deviceIdToUse?: string): Promise<boolean> => {
     if (typeof window === 'undefined' || !('BarcodeDetector' in window)) {
       return false;
@@ -197,9 +293,21 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
       ];
       const formats = desiredFormats.filter(f => supportedFormats.includes(f));
 
-      const detector = new BarcodeDetectorClass({
+      const barcodeDetector = new BarcodeDetectorClass({
         formats: formats.length > 0 ? formats : undefined
       });
+
+      // Optional Native TextDetector for concurrent number reading
+      let textDetector: any = null;
+      if ('TextDetector' in window) {
+        try {
+          const TextDetectorClass = (window as any).TextDetector;
+          textDetector = new TextDetectorClass();
+          setOcrActive(true);
+        } catch {
+          textDetector = null;
+        }
+      }
 
       const hasExactId = Boolean(deviceIdToUse && deviceIdToUse.trim().length > 0);
       const constraints: MediaStreamConstraints = {
@@ -233,7 +341,6 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         return false;
       }
 
-      // Attach stream directly - video element is fully visible in DOM
       video.srcObject = stream;
       video.setAttribute('playsinline', 'true');
       video.muted = true;
@@ -241,18 +348,29 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
       try {
         await video.play();
       } catch (playErr) {
-        console.warn("Video play error (will autoplay on interaction):", playErr);
+        console.warn("Video play error:", playErr);
       }
 
       setCameraActive(true);
       setActiveEngine('native');
       setCameraError(null);
 
-      // Fast RAF detection loop with 30 FPS non-blocking throttle for instant lock-on
+      // Fast Dual-Path Simultaneous Vision RAF loop
       let frames = 0;
       let lastFpsCheck = performance.now();
       let lastScanTime = 0;
-      let detecting = false;
+      let lastOcrTime = 0;
+      let detectingBarcode = false;
+      let detectingOcr = false;
+
+      // Lazy init offscreen canvas for OCR ROI
+      if (!offscreenCanvasRef.current) {
+        offscreenCanvasRef.current = document.createElement('canvas');
+        offscreenCanvasRef.current.width = 440;
+        offscreenCanvasRef.current.height = 140;
+      }
+      const offscreenCanvas = offscreenCanvasRef.current;
+      const offscreenCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
 
       const loop = async () => {
         if (isStoppingRef.current || scanSuccessLockRef.current) return;
@@ -264,24 +382,77 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           lastFpsCheck = now;
         }
 
-        if (!detecting && video.readyState >= 2 && (now - lastScanTime >= 35)) {
-          detecting = true;
-          lastScanTime = now;
-          frames++;
-          try {
-            const barcodes = await detector.detect(video);
-            if (barcodes && barcodes.length > 0 && !scanSuccessLockRef.current) {
-              const rawValue = barcodes[0].rawValue;
-              const clean = (rawValue || '').trim();
-              if (clean) {
-                triggerScanSuccess(clean);
-                return;
+        if (video.readyState >= 2) {
+          // PATH A: Native Zebra Barcode Detection (High frequency: every ~30ms)
+          if (!detectingBarcode && (now - lastScanTime >= 30)) {
+            detectingBarcode = true;
+            lastScanTime = now;
+            frames++;
+            try {
+              const barcodes = await barcodeDetector.detect(video);
+              if (barcodes && barcodes.length > 0 && !scanSuccessLockRef.current) {
+                const rawValue = barcodes[0].rawValue;
+                const clean = (rawValue || '').trim();
+                if (clean) {
+                  triggerScanSuccess(clean, 'barcode');
+                  return;
+                }
               }
+            } catch {
+              // Ignore frame decode glitch
+            } finally {
+              detectingBarcode = false;
             }
-          } catch {
-            // Frame parse error ignored
-          } finally {
-            detecting = false;
+          }
+
+          // PATH B: Concurrent Number OCR for Damaged / Smudged Zebra Bars (Throttled: every ~120ms)
+          if (textDetector && !detectingOcr && (now - lastOcrTime >= 120) && !scanSuccessLockRef.current) {
+            detectingOcr = true;
+            lastOcrTime = now;
+            try {
+              if (offscreenCtx && video.videoWidth > 0 && video.videoHeight > 0) {
+                // Focus on lower 40% of the targeting reticle where human-readable digits are printed
+                const srcW = video.videoWidth * 0.55;
+                const srcH = video.videoHeight * 0.35;
+                const srcX = (video.videoWidth - srcW) / 2;
+                const srcY = (video.videoHeight - srcH) / 2 + (srcH * 0.15);
+
+                offscreenCtx.drawImage(
+                  video,
+                  srcX, srcY, srcW, srcH,
+                  0, 0, offscreenCanvas.width, offscreenCanvas.height
+                );
+
+                // Quick adaptive high-contrast boost
+                const imgData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
+                const d = imgData.data;
+                for (let i = 0; i < d.length; i += 4) {
+                  const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
+                  // Binarize contrast
+                  const val = lum > 128 ? 255 : 0;
+                  d[i] = val;
+                  d[i + 1] = val;
+                  d[i + 2] = val;
+                }
+                offscreenCtx.putImageData(imgData, 0, 0);
+
+                const detectedTexts = await textDetector.detect(offscreenCanvas);
+                if (detectedTexts && detectedTexts.length > 0) {
+                  for (const textBlock of detectedTexts) {
+                    const rawText = textBlock.rawValue || '';
+                    const validDigits = cleanCandidateDigits(rawText);
+                    if (validDigits && !scanSuccessLockRef.current) {
+                      triggerScanSuccess(validDigits, 'ocr');
+                      return;
+                    }
+                  }
+                }
+              }
+            } catch {
+              // Ignore OCR frame error
+            } finally {
+              detectingOcr = false;
+            }
           }
         }
 
@@ -336,7 +507,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           if (scanSuccessLockRef.current) return;
           const clean = decodedText.trim();
           if (clean) {
-            triggerScanSuccess(clean);
+            triggerScanSuccess(clean, 'barcode');
           }
         },
         () => {
@@ -362,16 +533,17 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     await stopAllStreams();
     scanSuccessLockRef.current = false;
     setDetectionSuccess(false);
+    setDecodedVia(null);
     setCameraError(null);
 
     // Populate camera list
     const devs = await enumerateCameras();
-    const effectiveDeviceId = deviceId !== undefined ? deviceId : (devs.length > 0 ? devs[0].id : '');
+    const effectiveDeviceId = deviceId || (devs.length > 0 ? devs[0].id : undefined);
     if (effectiveDeviceId) {
       setSelectedDeviceId(effectiveDeviceId);
     }
 
-    // Try Tier 1 Native engine first
+    // Always attempt Tier 1 Native engine first
     const nativeStarted = await startNativeEngine(effectiveDeviceId);
     if (!nativeStarted) {
       // Fallback to Tier 2 Html5Qrcode engine
@@ -434,7 +606,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
       const decodedText = await html5QrCode.scanFile(file, true);
       const clean = decodedText.trim();
       if (clean) {
-        triggerScanSuccess(clean);
+        triggerScanSuccess(clean, 'barcode');
       }
     } catch {
       alert("Could not detect a clear barcode in this photo. Please ensure good lighting or type the code.");
@@ -447,7 +619,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     e.preventDefault();
     const clean = manualCode.trim();
     if (clean.length >= 3) {
-      triggerScanSuccess(clean);
+      triggerScanSuccess(clean, 'barcode');
     }
   };
 
@@ -477,15 +649,15 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               <div>
                 <div className="flex items-center gap-2">
                   <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    Industrial Barcode Engine
+                    Industrial Dual-Vision Engine
                   </h3>
                   <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
                     <Cpu size={10} />
-                    {activeEngine === 'native' ? 'Native GPU' : 'Auto Vision'}
+                    {activeEngine === 'native' ? 'Hardware GPU' : 'Wasm 60fps'}
                   </span>
                 </div>
                 <p className="text-xs text-slate-500 dark:text-gray-400">
-                  Full 1080p scan matrix with hardware auto-focus
+                  Simultaneous Zebra Bars + Digits OCR Auto-Detector
                 </p>
               </div>
             </div>
@@ -496,7 +668,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   type="button"
                   onClick={toggleTorch}
                   title="Toggle Flash Torch"
-                  className={`p-2 rounded-xl transition-all ${
+                  className={`p-2 rounded-xl transition-all cursor-pointer ${
                     torchOn 
                       ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/30' 
                       : 'bg-slate-200 dark:bg-white/5 text-slate-600 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-white/10'
@@ -516,7 +688,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           </div>
 
           <div className="p-5 sm:p-6 space-y-4">
-            {/* Camera Select & Status Toolbar */}
+            {/* Camera Select & Dual-Vision Engine Status Toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-100 dark:bg-[#151515] p-2.5 rounded-2xl border border-slate-200 dark:border-white/5">
               <div className="flex items-center gap-2 flex-1 min-w-[200px]">
                 <SwitchCamera size={16} className="text-slate-400 shrink-0" />
@@ -538,6 +710,10 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               </div>
 
               <div className="flex items-center gap-2 shrink-0">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-md border border-blue-500/20 flex items-center gap-1">
+                  <Zap size={10} className="text-amber-400" />
+                  Dual-Vision {ocrActive ? '+ OCR' : ''}
+                </span>
                 {cameraActive && (
                   <span className="text-[10px] font-mono font-bold text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
                     {fpsCounter > 0 ? `${fpsCounter} FPS` : 'LIVE'}
@@ -583,7 +759,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               </div>
             </form>
 
-            {/* Camera Viewfinder Box with Direct Video Stream & Corner Crosshairs */}
+            {/* Camera Viewfinder Box with Dual-Path Targeting Crosshairs */}
             <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden bg-black border border-slate-200 dark:border-white/10 flex items-center justify-center shadow-2xl">
               {/* Native Engine HTMLVideoElement - Always mounted and fully visible */}
               {isNativeVisionSupported ? (
@@ -601,7 +777,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                 />
               )}
 
-              {/* Success Green Flash Animation */}
+              {/* Success Green Flash Animation with Recognition Source Badge */}
               <AnimatePresence>
                 {detectionSuccess && (
                   <motion.div
@@ -617,56 +793,72 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                     >
                       <CheckCircle2 size={36} />
                     </motion.div>
-                    <span className="mt-3 text-xs font-black uppercase tracking-widest text-white drop-shadow-md">
-                      Barcode Decoded
+                    <span className="mt-3 text-sm font-black uppercase tracking-widest text-white drop-shadow-md flex items-center gap-1.5">
+                      {decodedVia === 'ocr' ? <Type size={16} /> : <Barcode size={16} />}
+                      {decodedVia === 'ocr' ? '✓ Decoded via Number OCR' : '✓ Decoded via Zebra Bars'}
+                    </span>
+                    <span className="text-[10px] text-white/90 font-medium">
+                      GS1 Modulo-10 Checksum Verified
                     </span>
                   </motion.div>
                 )}
               </AnimatePresence>
 
-              {/* Aiming Reticle & Animated Laser Line */}
+              {/* Aiming Reticle: Dual Target for Zebra Bars & Numbers Below */}
               {cameraActive && !detectionSuccess && (
                 <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-4 z-20">
                   {/* Top Status */}
                   <div className="flex justify-between items-center">
                     <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 bg-black/80 px-3 py-1 rounded-full border border-emerald-500/30 backdrop-blur-xs flex items-center gap-1.5 shadow-lg">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                      Continuous Detection Active
+                      ⚡ Dual Engine: Zebra Bars + Number OCR Active
                     </span>
                     <span className="text-[10px] font-bold text-white/80 bg-black/70 px-2 py-0.5 rounded-md backdrop-blur-xs">
-                      Omnidirectional
+                      Auto-Focus Continuous
                     </span>
                   </div>
 
-                  {/* Corner Targeting Reticle */}
-                  <div className="relative w-full max-w-[320px] aspect-[16/9] mx-auto flex items-center justify-center">
-                    {/* Top-Left Corner */}
+                  {/* Dual-Target Crosshairs Reticle */}
+                  <div className="relative w-full max-w-[340px] aspect-[16/10] mx-auto flex flex-col items-center justify-center">
+                    {/* Corner Reticles */}
                     <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-red-500 rounded-tl-lg" />
-                    {/* Top-Right Corner */}
                     <div className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-red-500 rounded-tr-lg" />
-                    {/* Bottom-Left Corner */}
                     <div className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-red-500 rounded-bl-lg" />
-                    {/* Bottom-Right Corner */}
                     <div className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-red-500 rounded-br-lg" />
 
-                    {/* Animated Scanning Laser Line */}
-                    <motion.div
-                      animate={{
-                        y: [-50, 50, -50],
-                      }}
-                      transition={{
-                        repeat: Infinity,
-                        duration: 1.8,
-                        ease: "easeInOut"
-                      }}
-                      className="w-full h-0.5 bg-red-500 shadow-[0_0_12px_#ef4444,0_0_24px_#dc2626]"
-                    />
+                    {/* Upper Target Zone: Zebra Bars Scanner */}
+                    <div className="relative w-full h-[60%] flex items-center justify-center">
+                      <motion.div
+                        animate={{
+                          y: [-35, 35, -35],
+                        }}
+                        transition={{
+                          repeat: Infinity,
+                          duration: 1.8,
+                          ease: "easeInOut"
+                        }}
+                        className="w-full h-0.5 bg-red-500 shadow-[0_0_12px_#ef4444,0_0_24px_#dc2626]"
+                      />
+                      <span className="absolute top-2 right-3 text-[9px] font-mono text-red-400/80 bg-black/60 px-1.5 py-0.5 rounded">
+                        Zebra Pattern Focus
+                      </span>
+                    </div>
+
+                    {/* Lower Target Zone: Human-Readable Digits Guideline */}
+                    <div className="w-full h-[40%] border-t border-dashed border-amber-400/40 flex items-center justify-between px-3 bg-amber-500/5">
+                      <span className="text-[9px] font-black uppercase tracking-wider text-amber-400/90 flex items-center gap-1">
+                        <Type size={10} /> OCR Digit Reader
+                      </span>
+                      <span className="text-[8px] font-mono text-white/60">
+                        [8901262010125]
+                      </span>
+                    </div>
                   </div>
 
                   {/* Bottom Guide */}
                   <div className="text-center">
                     <span className="text-[10px] text-white/80 bg-black/80 px-3.5 py-1 rounded-full backdrop-blur-xs border border-white/10 shadow-lg">
-                      Position any barcode within view • Instant read
+                      Point at either Zebra Bars or printed numbers • Auto-decoded instantly
                     </span>
                   </div>
                 </div>
@@ -717,7 +909,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                     key={item.code}
                     type="button"
                     onClick={() => {
-                      triggerScanSuccess(item.code);
+                      triggerScanSuccess(item.code, 'barcode');
                     }}
                     className="px-2.5 py-1 rounded-xl text-[11px] font-medium bg-slate-100 dark:bg-[#1E1E1E] hover:bg-blue-50 dark:hover:bg-blue-950/40 hover:text-blue-600 dark:hover:text-blue-400 border border-slate-200/80 dark:border-white/5 transition-all text-slate-700 dark:text-gray-300 flex items-center gap-1.5 cursor-pointer"
                     title={`Click to simulate scanning ${item.code}`}

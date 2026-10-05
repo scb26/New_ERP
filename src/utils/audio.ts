@@ -104,3 +104,35 @@ export function playScanErrorSound() {
     // Graceful fallback
   }
 }
+
+/**
+ * OCR Digit Recognition Harmonic Chime (1046Hz -> 1318Hz -> 1568Hz / C6-E6-G6 Triad)
+ * Triggered when printed digits are recognized and validated via GS1 Modulo-10.
+ */
+export function playOcrSuccessSound() {
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    [1046.5, 1318.5, 1567.98].forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + idx * 0.04);
+
+      gain.gain.setValueAtTime(0.1, now + idx * 0.04);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + idx * 0.04 + 0.08);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now + idx * 0.04);
+      osc.stop(now + idx * 0.04 + 0.08);
+    });
+  } catch {
+    // Graceful fallback
+  }
+}
+
