@@ -9,23 +9,16 @@ import {
   Barcode, 
   Keyboard, 
   ArrowRight,
-  Flashlight,
   SwitchCamera,
   CheckCircle2,
-  Cpu,
   RefreshCw,
   Zap,
-  Type
 } from 'lucide-react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import { playScanSuccessSound } from '../utils/audio';
 
-// --- GS1 Checksum & Digit Parsing Utilities ---
+// --- GS1 Checksum Utilities ---
 
-/**
- * Validates standard GS1 EAN-13 Modulo-10 checksum.
- * Sum of odd positions (from right, excluding check digit) * 3 + sum of even positions * 1
- */
 export function isValidEan13Checksum(code: string): boolean {
   if (!/^\d{13}$/.test(code)) return false;
   let sum = 0;
@@ -37,9 +30,6 @@ export function isValidEan13Checksum(code: string): boolean {
   return checkDigit === parseInt(code[12], 10);
 }
 
-/**
- * Validates standard GS1 UPC-A Modulo-10 checksum.
- */
 export function isValidUpcAChecksum(code: string): boolean {
   if (!/^\d{12}$/.test(code)) return false;
   let sum = 0;
@@ -51,9 +41,6 @@ export function isValidUpcAChecksum(code: string): boolean {
   return checkDigit === parseInt(code[11], 10);
 }
 
-/**
- * Validates EAN-8 Modulo-10 checksum.
- */
 export function isValidEan8Checksum(code: string): boolean {
   if (!/^\d{8}$/.test(code)) return false;
   let sum = 0;
@@ -63,50 +50,6 @@ export function isValidEan8Checksum(code: string): boolean {
   }
   const checkDigit = (10 - (sum % 10)) % 10;
   return checkDigit === parseInt(code[7], 10);
-}
-
-/**
- * Extracts and verifies candidate 8, 12, or 13-digit numbers from recognized text.
- */
-export function cleanCandidateDigits(str: string): string | null {
-  if (!str) return null;
-  // Clean whitespace and common OCR noise
-  const sanitized = str.replace(/[\s\-_.:,]/g, '');
-
-  // Look for 13-digit sequence (EAN-13)
-  const ean13Matches = sanitized.match(/\d{13}/g);
-  if (ean13Matches) {
-    for (const match of ean13Matches) {
-      if (isValidEan13Checksum(match)) return match;
-    }
-  }
-
-  // Look for 12-digit sequence (UPC-A)
-  const upcMatches = sanitized.match(/\d{12}/g);
-  if (upcMatches) {
-    for (const match of upcMatches) {
-      if (isValidUpcAChecksum(match)) return match;
-    }
-  }
-
-  // Look for 8-digit sequence (EAN-8)
-  const ean8Matches = sanitized.match(/\d{8}/g);
-  if (ean8Matches) {
-    for (const match of ean8Matches) {
-      if (isValidEan8Checksum(match)) return match;
-    }
-  }
-
-  // Fallback: If clean 12-14 digits sequence exists without GS1 checksum match
-  const rawDigits = sanitized.replace(/\D/g, '');
-  if (rawDigits.length === 13 && isValidEan13Checksum(rawDigits)) {
-    return rawDigits;
-  }
-  if (rawDigits.length === 12 && isValidUpcAChecksum(rawDigits)) {
-    return rawDigits;
-  }
-
-  return null;
 }
 
 interface BarcodeCameraModalProps {
@@ -128,117 +71,104 @@ const SAMPLE_TEST_BARCODES = [
   { name: 'Nutella 350g', code: '3017620422003', tag: 'Open Food Facts' },
 ];
 
+// Unique IDs for viewfinders to avoid conflicts
+const NATIVE_VIDEO_ID = 'barcode-native-video';
+const H5Q_CONTAINER_ID = 'barcode-h5q-container';
+
 export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
   isOpen,
   onClose,
   onScan
 }) => {
-  // State
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState('');
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
-  const [activeEngine, setActiveEngine] = useState<'native' | 'html5qrcode'>('native');
+  const [engineLabel, setEngineLabel] = useState<string>('Initializing...');
   const [hasTorch, setHasTorch] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [detectionSuccess, setDetectionSuccess] = useState(false);
-  const [decodedVia, setDecodedVia] = useState<'barcode' | 'ocr' | null>(null);
-  const [fpsCounter, setFpsCounter] = useState(0);
-  const [ocrActive, setOcrActive] = useState(false);
 
   // Refs
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const offscreenCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const currentStreamRef = useRef<MediaStream | null>(null);
-  const nativeAnimFrameRef = useRef<number | null>(null);
+  const rafRef = useRef<number | null>(null);
   const html5QrCodeRef = useRef<Html5Qrcode | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null!);
   const isStoppingRef = useRef(false);
-  const scanSuccessLockRef = useRef(false);
+  const scanLockRef = useRef(false);
+  const engineModeRef = useRef<'native' | 'html5' | 'none'>('none');
 
-  // Stop all camera pipelines cleanly
+  // ─── CLEANUP ───────────────────────────────────────────────────────────────
   const stopAllStreams = useCallback(async () => {
     isStoppingRef.current = true;
 
-    // 1. Stop Native requestAnimationFrame loop
-    if (nativeAnimFrameRef.current) {
-      cancelAnimationFrame(nativeAnimFrameRef.current);
-      nativeAnimFrameRef.current = null;
+    // Cancel native RAF loop
+    if (rafRef.current) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
     }
 
-    // 2. Stop raw MediaStream tracks
+    // Stop raw MediaStream
     if (currentStreamRef.current) {
-      currentStreamRef.current.getTracks().forEach(t => {
-        try {
-          t.stop();
-        } catch {}
-      });
+      currentStreamRef.current.getTracks().forEach(t => { try { t.stop(); } catch {} });
       currentStreamRef.current = null;
     }
 
+    // Detach video
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
 
-    // 3. Stop Html5Qrcode instance
+    // Stop Html5Qrcode
     if (html5QrCodeRef.current) {
       try {
         if (html5QrCodeRef.current.isScanning) {
           await html5QrCodeRef.current.stop();
         }
       } catch {}
-      try {
-        html5QrCodeRef.current.clear();
-      } catch {}
+      try { html5QrCodeRef.current.clear(); } catch {}
       html5QrCodeRef.current = null;
     }
 
+    engineModeRef.current = 'none';
     setCameraActive(false);
     setHasTorch(false);
     setTorchOn(false);
-    setOcrActive(false);
     isStoppingRef.current = false;
   }, []);
 
-  // Handle successful scan with feedback animation
-  const triggerScanSuccess = useCallback((barcode: string, source: 'barcode' | 'ocr' = 'barcode') => {
-    if (scanSuccessLockRef.current) return;
-    scanSuccessLockRef.current = true;
+  // ─── SCAN SUCCESS ──────────────────────────────────────────────────────────
+  const triggerScanSuccess = useCallback((barcode: string) => {
+    if (scanLockRef.current) return;
+    scanLockRef.current = true;
 
-    setDecodedVia(source);
     setDetectionSuccess(true);
     playScanSuccessSound();
 
     setTimeout(() => {
       onScan(barcode);
       onClose();
-    }, 280);
+    }, 300);
   }, [onScan, onClose]);
 
-  // Discover and filter camera devices (filtering out IR / Windows Hello sensors)
+  // ─── CAMERA ENUMERATION ───────────────────────────────────────────────────
   const enumerateCameras = useCallback(async (): Promise<CameraDevice[]> => {
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
-        return [];
-      }
       const allDevs = await navigator.mediaDevices.enumerateDevices();
       const videoDevs = allDevs.filter(d => d.kind === 'videoinput');
-
-      // Filter out IR cameras (Windows Hello, RealSense IR)
       const valid = videoDevs.filter(d => {
         const lbl = (d.label || '').toLowerCase();
-        return !lbl.includes('ir camera') && 
-               !lbl.includes('infrared') && 
-               !lbl.includes('hello face') && 
+        return !lbl.includes('ir camera') &&
+               !lbl.includes('infrared') &&
+               !lbl.includes('hello face') &&
                !lbl.includes('depth');
       });
-
       const list: CameraDevice[] = (valid.length > 0 ? valid : videoDevs).map((d, i) => ({
         id: d.deviceId,
         label: d.label || `Camera ${i + 1}`
       }));
-
       setDevices(list);
       return list;
     } catch {
@@ -246,95 +176,67 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     }
   }, []);
 
-  // Check and setup torch capabilities
-  const inspectTorchCapability = (stream: MediaStream) => {
-    try {
-      const track = stream.getVideoTracks()[0];
-      if (track && typeof track.getCapabilities === 'function') {
-        const caps = track.getCapabilities() as any;
-        if (caps && caps.torch) {
-          setHasTorch(true);
-          return;
-        }
-      }
-    } catch {}
-    setHasTorch(false);
-  };
-
-  // Toggle hardware torch
+  // ─── TORCH ────────────────────────────────────────────────────────────────
   const toggleTorch = async () => {
     if (!currentStreamRef.current) return;
     const track = currentStreamRef.current.getVideoTracks()[0];
     if (!track) return;
-
     try {
-      const nextState = !torchOn;
-      await (track as any).applyConstraints({
-        advanced: [{ torch: nextState }]
-      });
-      setTorchOn(nextState);
-    } catch (err) {
-      console.warn("Torch applyConstraints error:", err);
-    }
+      const next = !torchOn;
+      await (track as any).applyConstraints({ advanced: [{ torch: next }] });
+      setTorchOn(next);
+    } catch {}
   };
 
-  // --- Tier 1: Dual-Path Simultaneous Vision (Zebra Barcode + Number OCR) ---
-  const startNativeEngine = async (deviceIdToUse?: string): Promise<boolean> => {
+  // ─── ENGINE A: Native BarcodeDetector + raw video stream ──────────────────
+  const startNativeEngine = async (deviceId?: string): Promise<boolean> => {
     if (typeof window === 'undefined' || !('BarcodeDetector' in window)) {
+      console.log('[Scanner] BarcodeDetector not available');
       return false;
     }
 
     try {
+      // Get supported formats
       const BarcodeDetectorClass = (window as any).BarcodeDetector;
-      const supportedFormats = await BarcodeDetectorClass.getSupportedFormats().catch(() => []);
-      
-      const desiredFormats = [
-        'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'
-      ];
-      const formats = desiredFormats.filter(f => supportedFormats.includes(f));
+      let supportedFormats: string[] = [];
+      try {
+        supportedFormats = await BarcodeDetectorClass.getSupportedFormats();
+      } catch {}
 
-      const barcodeDetector = new BarcodeDetectorClass({
-        formats: formats.length > 0 ? formats : undefined
-      });
+      const desired = ['ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code', 'itf', 'codabar'];
+      const formats = supportedFormats.length > 0
+        ? desired.filter(f => supportedFormats.includes(f))
+        : desired;
 
-      // Optional Native TextDetector for concurrent number reading
-      let textDetector: any = null;
-      if ('TextDetector' in window) {
-        try {
-          const TextDetectorClass = (window as any).TextDetector;
-          textDetector = new TextDetectorClass();
-          setOcrActive(true);
-        } catch {
-          textDetector = null;
-        }
-      }
+      console.log('[Scanner] BarcodeDetector formats:', formats);
 
-      const hasExactId = Boolean(deviceIdToUse && deviceIdToUse.trim().length > 0);
+      const detector = new BarcodeDetectorClass({ formats: formats.length > 0 ? formats : undefined });
+
+      // Build camera constraints - permissive to avoid OverconstrainedError
       const constraints: MediaStreamConstraints = {
-        video: {
-          deviceId: hasExactId ? { exact: deviceIdToUse } : undefined,
-          facingMode: hasExactId ? undefined : { ideal: 'environment' },
-          width: { ideal: 1280, max: 1920 },
-          height: { ideal: 720, max: 1080 }
-        },
+        video: deviceId
+          ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
         audio: false
       };
 
+      console.log('[Scanner] Requesting getUserMedia...', constraints);
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       currentStreamRef.current = stream;
+      console.log('[Scanner] Got stream, tracks:', stream.getVideoTracks().length);
 
+      // Try to enable continuous autofocus/exposure
       try {
         const track = stream.getVideoTracks()[0];
-        if (track && typeof track.applyConstraints === 'function') {
-          // @ts-ignore
-          await track.applyConstraints({
-            advanced: [{ focusMode: 'continuous', exposureMode: 'continuous' } as any]
-          }).catch(() => {});
+        if (track?.applyConstraints) {
+          await track.applyConstraints({ advanced: [{ focusMode: 'continuous', exposureMode: 'continuous' } as any] }).catch(() => {});
         }
+        // Check torch capability
+        const caps = (track as any).getCapabilities?.() || {};
+        setHasTorch(!!caps.torch);
       } catch {}
 
-      inspectTorchCapability(stream);
-
+      // Attach to video element
       const video = videoRef.current;
       if (!video) {
         stream.getTracks().forEach(t => t.stop());
@@ -345,126 +247,85 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
       video.setAttribute('playsinline', 'true');
       video.muted = true;
 
-      try {
-        await video.play();
-      } catch (playErr) {
-        console.warn("Video play error:", playErr);
+      // Wait for video to be ready
+      await new Promise<void>((resolve) => {
+        const onReady = () => {
+          video.removeEventListener('loadeddata', onReady);
+          resolve();
+        };
+        video.addEventListener('loadeddata', onReady);
+        video.play().catch(err => {
+          console.warn('[Scanner] play() failed:', err);
+          resolve();
+        });
+      });
+
+      console.log('[Scanner] Video ready. videoWidth:', video.videoWidth, 'videoHeight:', video.videoHeight, 'readyState:', video.readyState);
+
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        // Video didn't initialize properly - might happen on some browsers
+        // Wait a bit more
+        await new Promise(r => setTimeout(r, 500));
+        console.log('[Scanner] After wait - videoWidth:', video.videoWidth, 'videoHeight:', video.videoHeight);
       }
 
       setCameraActive(true);
-      setActiveEngine('native');
+      setEngineLabel('Native GPU · BarcodeDetector');
+      engineModeRef.current = 'native';
       setCameraError(null);
 
-      // Fast Dual-Path Simultaneous Vision RAF loop
-      let frames = 0;
-      let lastFpsCheck = performance.now();
-      let lastScanTime = 0;
-      let lastOcrTime = 0;
-      let detectingBarcode = false;
-      let detectingOcr = false;
-
-      // Lazy init offscreen canvas for OCR ROI
-      if (!offscreenCanvasRef.current) {
-        offscreenCanvasRef.current = document.createElement('canvas');
-        offscreenCanvasRef.current.width = 440;
-        offscreenCanvasRef.current.height = 140;
-      }
-      const offscreenCanvas = offscreenCanvasRef.current;
-      const offscreenCtx = offscreenCanvas.getContext('2d', { willReadFrequently: true });
+      // RAF detection loop
+      let lastDetectTime = 0;
+      let detecting = false;
+      let frameCount = 0;
 
       const loop = async () => {
-        if (isStoppingRef.current || scanSuccessLockRef.current) return;
+        if (isStoppingRef.current || scanLockRef.current) return;
 
         const now = performance.now();
-        if (now - lastFpsCheck >= 1000) {
-          setFpsCounter(frames);
-          frames = 0;
-          lastFpsCheck = now;
-        }
+        frameCount++;
 
-        if (video.readyState >= 2) {
-          // PATH A: Native Zebra Barcode Detection (High frequency: every ~30ms)
-          if (!detectingBarcode && (now - lastScanTime >= 30)) {
-            detectingBarcode = true;
-            lastScanTime = now;
-            frames++;
-            try {
-              const barcodes = await barcodeDetector.detect(video);
-              if (barcodes && barcodes.length > 0 && !scanSuccessLockRef.current) {
-                const rawValue = barcodes[0].rawValue;
-                const clean = (rawValue || '').trim();
-                if (clean) {
-                  triggerScanSuccess(clean, 'barcode');
+        // Attempt detection at most every 40ms (~25 fps detection rate)
+        if (!detecting && (now - lastDetectTime) >= 40) {
+          detecting = true;
+          lastDetectTime = now;
+
+          try {
+            if (video.readyState >= 2 && video.videoWidth > 0) {
+              const results = await detector.detect(video);
+              if (results && results.length > 0) {
+                const val = results[0].rawValue?.trim();
+                console.log('[Scanner] ✅ Detected barcode:', val, 'format:', results[0].format);
+                if (val) {
+                  triggerScanSuccess(val);
                   return;
                 }
               }
-            } catch {
-              // Ignore frame decode glitch
-            } finally {
-              detectingBarcode = false;
-            }
-          }
-
-          // PATH B: Concurrent Number OCR for Damaged / Smudged Zebra Bars (Throttled: every ~120ms)
-          if (textDetector && !detectingOcr && (now - lastOcrTime >= 120) && !scanSuccessLockRef.current) {
-            detectingOcr = true;
-            lastOcrTime = now;
-            try {
-              if (offscreenCtx && video.videoWidth > 0 && video.videoHeight > 0) {
-                // Focus on lower 40% of the targeting reticle where human-readable digits are printed
-                const srcW = video.videoWidth * 0.55;
-                const srcH = video.videoHeight * 0.35;
-                const srcX = (video.videoWidth - srcW) / 2;
-                const srcY = (video.videoHeight - srcH) / 2 + (srcH * 0.15);
-
-                offscreenCtx.drawImage(
-                  video,
-                  srcX, srcY, srcW, srcH,
-                  0, 0, offscreenCanvas.width, offscreenCanvas.height
-                );
-
-                // Quick adaptive high-contrast boost
-                const imgData = offscreenCtx.getImageData(0, 0, offscreenCanvas.width, offscreenCanvas.height);
-                const d = imgData.data;
-                for (let i = 0; i < d.length; i += 4) {
-                  const lum = (d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114);
-                  // Binarize contrast
-                  const val = lum > 128 ? 255 : 0;
-                  d[i] = val;
-                  d[i + 1] = val;
-                  d[i + 2] = val;
-                }
-                offscreenCtx.putImageData(imgData, 0, 0);
-
-                const detectedTexts = await textDetector.detect(offscreenCanvas);
-                if (detectedTexts && detectedTexts.length > 0) {
-                  for (const textBlock of detectedTexts) {
-                    const rawText = textBlock.rawValue || '';
-                    const validDigits = cleanCandidateDigits(rawText);
-                    if (validDigits && !scanSuccessLockRef.current) {
-                      triggerScanSuccess(validDigits, 'ocr');
-                      return;
-                    }
-                  }
-                }
+              // Log every 100 frames to confirm loop is alive
+              if (frameCount % 100 === 0) {
+                console.log(`[Scanner] Loop alive - frame ${frameCount}, readyState: ${video.readyState}, size: ${video.videoWidth}x${video.videoHeight}`);
               }
-            } catch {
-              // Ignore OCR frame error
-            } finally {
-              detectingOcr = false;
+            } else {
+              if (frameCount % 50 === 0) {
+                console.warn(`[Scanner] Video not ready - readyState: ${video.readyState}, size: ${video.videoWidth}x${video.videoHeight}`);
+              }
             }
+          } catch (err) {
+            console.warn('[Scanner] detect() error:', err);
+          } finally {
+            detecting = false;
           }
         }
 
-        if (!isStoppingRef.current && !scanSuccessLockRef.current) {
-          nativeAnimFrameRef.current = requestAnimationFrame(loop);
+        if (!isStoppingRef.current && !scanLockRef.current) {
+          rafRef.current = requestAnimationFrame(loop);
         }
       };
 
-      nativeAnimFrameRef.current = requestAnimationFrame(loop);
+      rafRef.current = requestAnimationFrame(loop);
       return true;
-    } catch (err) {
-      console.warn("Native BarcodeDetector engine failed:", err);
+    } catch (err: any) {
+      console.error('[Scanner] Native engine failed:', err?.name, err?.message);
       if (currentStreamRef.current) {
         currentStreamRef.current.getTracks().forEach(t => t.stop());
         currentStreamRef.current = null;
@@ -473,14 +334,18 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     }
   };
 
-  // --- Tier 2: Html5Qrcode Fallback Engine ---
-  const startHtml5QrcodeEngine = async (deviceIdToUse?: string) => {
+  // ─── ENGINE B: Html5Qrcode fallback (attaches to the fallback div) ─────────
+  const startHtml5Engine = async (deviceId?: string): Promise<boolean> => {
     try {
-      const containerId = "interactive-barcode-fallback-viewfinder";
-      const container = document.getElementById(containerId);
-      if (!container) return;
+      const container = document.getElementById(H5Q_CONTAINER_ID);
+      if (!container) {
+        console.error('[Scanner] H5Q container not found in DOM!');
+        return false;
+      }
 
-      const html5QrCode = new Html5Qrcode(containerId, {
+      console.log('[Scanner] Starting Html5Qrcode engine...');
+
+      const h5q = new Html5Qrcode(H5Q_CONTAINER_ID, {
         formatsToSupport: [
           Html5QrcodeSupportedFormats.EAN_13,
           Html5QrcodeSupportedFormats.EAN_8,
@@ -488,128 +353,118 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           Html5QrcodeSupportedFormats.CODE_39,
           Html5QrcodeSupportedFormats.UPC_A,
           Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.QR_CODE
+          Html5QrcodeSupportedFormats.QR_CODE,
         ],
-        verbose: false
+        verbose: false,
+        useBarCodeDetectorIfSupported: true,
       });
-      html5QrCodeRef.current = html5QrCode;
+      html5QrCodeRef.current = h5q;
 
-      const hasExactId = Boolean(deviceIdToUse && deviceIdToUse.trim().length > 0);
-      const cameraConfig = hasExactId ? { deviceId: { exact: deviceIdToUse } } : { facingMode: "environment" };
+      const camConfig = deviceId
+        ? { deviceId: { exact: deviceId } }
+        : { facingMode: 'environment' };
 
-      await html5QrCode.start(
-        cameraConfig,
-        {
-          fps: 25,
-          disableFlip: false
-        },
+      await h5q.start(
+        camConfig,
+        { fps: 20, disableFlip: false },
         (decodedText) => {
-          if (scanSuccessLockRef.current) return;
-          const clean = decodedText.trim();
-          if (clean) {
-            triggerScanSuccess(clean, 'barcode');
-          }
+          if (scanLockRef.current) return;
+          const val = decodedText?.trim();
+          console.log('[Scanner] ✅ Html5Qrcode decoded:', val);
+          if (val) triggerScanSuccess(val);
         },
-        () => {
-          // ignore scan frame error
-        }
+        () => { /* ignore per-frame errors */ }
       );
 
       setCameraActive(true);
-      setActiveEngine('html5qrcode');
+      setEngineLabel('Html5Qrcode · Wasm');
+      engineModeRef.current = 'html5';
       setCameraError(null);
+      console.log('[Scanner] Html5Qrcode started');
+      return true;
     } catch (err: any) {
-      console.warn("Html5Qrcode engine failed:", err);
-      setCameraError(
-        err?.message?.includes('Permission') || err?.name === 'NotAllowedError'
-          ? "Camera permission denied. Please allow camera access in browser settings."
-          : "No camera stream available. Type the printed code below or upload an image."
-      );
+      console.error('[Scanner] Html5Qrcode failed:', err?.name, err?.message);
+      return false;
     }
   };
 
-  // Start engine pipeline
+  // ─── BOOT: Try Native → Fallback to Html5Qrcode ───────────────────────────
   const bootScanner = useCallback(async (deviceId?: string) => {
+    console.log('[Scanner] bootScanner called, deviceId:', deviceId);
     await stopAllStreams();
-    scanSuccessLockRef.current = false;
+    scanLockRef.current = false;
     setDetectionSuccess(false);
-    setDecodedVia(null);
     setCameraError(null);
+    setEngineLabel('Starting camera...');
 
-    // Populate camera list
+    // Populate camera list first (needed for getUserMedia labels)
     const devs = await enumerateCameras();
-    const effectiveDeviceId = deviceId || (devs.length > 0 ? devs[0].id : undefined);
-    if (effectiveDeviceId) {
-      setSelectedDeviceId(effectiveDeviceId);
+    const effectiveId = deviceId || (devs.length > 0 ? devs[0].id : undefined);
+    if (effectiveId) setSelectedDeviceId(effectiveId);
+
+    // Try Native BarcodeDetector first (GPU-accelerated, fastest)
+    const nativeOk = await startNativeEngine(effectiveId);
+    if (nativeOk) {
+      console.log('[Scanner] Native engine running ✓');
+      return;
     }
 
-    // Always attempt Tier 1 Native engine first
-    const nativeStarted = await startNativeEngine(effectiveDeviceId);
-    if (!nativeStarted) {
-      // Fallback to Tier 2 Html5Qrcode engine
-      await startHtml5QrcodeEngine(effectiveDeviceId);
+    // Fallback: Html5Qrcode library
+    console.log('[Scanner] Falling back to Html5Qrcode...');
+    const h5qOk = await startHtml5Engine(effectiveId);
+    if (h5qOk) {
+      console.log('[Scanner] Html5Qrcode running ✓');
+      return;
     }
+
+    // Complete failure
+    console.error('[Scanner] All engines failed');
+    setCameraError('Camera unavailable. Please allow camera access, or type the barcode number below.');
   }, [stopAllStreams, enumerateCameras]);
 
-  // Lifecycle
+  // ─── LIFECYCLE ─────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!isOpen) return;
-
-    let timer = setTimeout(() => {
-      bootScanner();
-    }, 150);
-
+    const timer = setTimeout(() => bootScanner(), 150);
     return () => {
       clearTimeout(timer);
       stopAllStreams();
     };
-  }, [isOpen, bootScanner, stopAllStreams]);
+  }, [isOpen]);
 
-  // Escape key handler
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-      }
+      if (e.key === 'Escape') { e.preventDefault(); onClose(); }
     };
     window.addEventListener('keydown', handleKey, true);
     return () => window.removeEventListener('keydown', handleKey, true);
   }, [isOpen, onClose]);
 
-  // Handle switching camera device
-  const handleDeviceChange = async (newDeviceId: string) => {
-    setSelectedDeviceId(newDeviceId);
-    await bootScanner(newDeviceId);
+  // ─── HANDLERS ─────────────────────────────────────────────────────────────
+  const handleDeviceChange = async (newId: string) => {
+    setSelectedDeviceId(newId);
+    await bootScanner(newId);
   };
 
-  // Handle image upload scan
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
     try {
-      const html5QrCode = new Html5Qrcode("interactive-barcode-fallback-viewfinder", {
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.QR_CODE
-        ],
-        verbose: false
-      });
-
-      const decodedText = await html5QrCode.scanFile(file, true);
-      const clean = decodedText.trim();
-      if (clean) {
-        triggerScanSuccess(clean, 'barcode');
+      // Need a temporary div for the scanner
+      let tempDiv = document.getElementById('barcode-file-scanner-temp');
+      if (!tempDiv) {
+        tempDiv = document.createElement('div');
+        tempDiv.id = 'barcode-file-scanner-temp';
+        tempDiv.style.display = 'none';
+        document.body.appendChild(tempDiv);
       }
+      const h5q = new Html5Qrcode('barcode-file-scanner-temp', { verbose: false });
+      const decoded = await h5q.scanFile(file, true);
+      try { h5q.clear(); } catch {}
+      if (decoded?.trim()) triggerScanSuccess(decoded.trim());
     } catch {
-      alert("Could not detect a clear barcode in this photo. Please ensure good lighting or type the code.");
+      alert('Could not detect a barcode in this photo. Try better lighting or type the code below.');
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
@@ -617,23 +472,22 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
 
   const handleManualSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    const clean = manualCode.trim();
-    if (clean.length >= 3) {
-      triggerScanSuccess(clean, 'barcode');
-    }
+    const code = manualCode.trim();
+    if (code.length >= 3) triggerScanSuccess(code);
   };
 
   if (!isOpen) return null;
 
-  const isNativeVisionSupported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
+  // Determine which viewfinder to show based on what's active
+  const useNativeVideo = typeof window !== 'undefined' && 'BarcodeDetector' in window;
 
   return (
     <AnimatePresence>
-      <div 
+      <div
         onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
         className="fixed inset-0 z-[200] flex items-center justify-center p-3 sm:p-4 bg-black/85 backdrop-blur-md cursor-pointer"
       >
-        <motion.div 
+        <motion.div
           onClick={(e) => e.stopPropagation()}
           initial={{ opacity: 0, scale: 0.95, y: 15 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -649,16 +503,16 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               <div>
                 <div className="flex items-center gap-2">
                   <h3 className="text-base font-bold text-slate-900 dark:text-white">
-                    Industrial Dual-Vision Engine
+                    Barcode Scanner
                   </h3>
-                  <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
-                    <Cpu size={10} />
-                    {activeEngine === 'native' ? 'Hardware GPU' : 'Wasm 60fps'}
-                  </span>
+                  {cameraActive && (
+                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
+                      LIVE
+                    </span>
+                  )}
                 </div>
-                <p className="text-xs text-slate-500 dark:text-gray-400">
-                  Simultaneous Zebra Bars + Digits OCR Auto-Detector
-                </p>
+                <p className="text-xs text-slate-500 dark:text-gray-400">{engineLabel}</p>
               </div>
             </div>
 
@@ -667,18 +521,18 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                 <button
                   type="button"
                   onClick={toggleTorch}
-                  title="Toggle Flash Torch"
+                  title="Toggle Flash"
                   className={`p-2 rounded-xl transition-all cursor-pointer ${
-                    torchOn 
-                      ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/30' 
+                    torchOn
+                      ? 'bg-amber-500 text-white shadow-lg shadow-amber-500/30'
                       : 'bg-slate-200 dark:bg-white/5 text-slate-600 dark:text-gray-300 hover:bg-slate-300 dark:hover:bg-white/10'
                   }`}
                 >
-                  <Flashlight size={18} />
+                  <Zap size={18} />
                 </button>
               )}
-              <button 
-                type="button" 
+              <button
+                type="button"
                 onClick={onClose}
                 className="p-2 text-slate-400 hover:text-slate-800 dark:hover:text-white rounded-xl transition-colors cursor-pointer"
               >
@@ -688,7 +542,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           </div>
 
           <div className="p-5 sm:p-6 space-y-4">
-            {/* Camera Select & Dual-Vision Engine Status Toolbar */}
+            {/* Camera selector toolbar */}
             <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-100 dark:bg-[#151515] p-2.5 rounded-2xl border border-slate-200 dark:border-white/5">
               <div className="flex items-center gap-2 flex-1 min-w-[200px]">
                 <SwitchCamera size={16} className="text-slate-400 shrink-0" />
@@ -698,7 +552,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   className="w-full bg-transparent text-xs font-semibold text-slate-700 dark:text-gray-200 outline-none cursor-pointer truncate"
                 >
                   {devices.length === 0 ? (
-                    <option value="">Default Counter Camera</option>
+                    <option value="">Default Camera</option>
                   ) : (
                     devices.map((d) => (
                       <option key={d.id} value={d.id} className="bg-slate-900 text-white">
@@ -708,29 +562,17 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   )}
                 </select>
               </div>
-
-              <div className="flex items-center gap-2 shrink-0">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded-md border border-blue-500/20 flex items-center gap-1">
-                  <Zap size={10} className="text-amber-400" />
-                  Dual-Vision {ocrActive ? '+ OCR' : ''}
-                </span>
-                {cameraActive && (
-                  <span className="text-[10px] font-mono font-bold text-emerald-500 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-500/20">
-                    {fpsCounter > 0 ? `${fpsCounter} FPS` : 'LIVE'}
-                  </span>
-                )}
-                <button
-                  type="button"
-                  onClick={() => bootScanner(selectedDeviceId)}
-                  title="Reconnect Camera"
-                  className="p-1.5 text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors cursor-pointer"
-                >
-                  <RefreshCw size={14} />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => bootScanner(selectedDeviceId)}
+                title="Reconnect Camera"
+                className="p-1.5 text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors cursor-pointer"
+              >
+                <RefreshCw size={14} />
+              </button>
             </div>
 
-            {/* Direct Input for numbers printed below barcode */}
+            {/* Manual barcode entry */}
             <form onSubmit={handleManualSubmit} className="space-y-1.5 bg-blue-50/70 dark:bg-blue-950/20 p-3 rounded-2xl border border-blue-200/70 dark:border-blue-900/40">
               <div className="flex items-center justify-between">
                 <label className="text-[11px] font-black uppercase tracking-wider text-blue-700 dark:text-blue-300 flex items-center gap-1.5">
@@ -759,25 +601,25 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               </div>
             </form>
 
-            {/* Camera Viewfinder Box with Dual-Path Targeting Crosshairs */}
+            {/* Camera Viewfinder */}
             <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden bg-black border border-slate-200 dark:border-white/10 flex items-center justify-center shadow-2xl">
-              {/* Native Engine HTMLVideoElement - Always mounted and fully visible */}
-              {isNativeVisionSupported ? (
-                <video
-                  ref={videoRef}
-                  className="w-full h-full object-cover block"
-                  autoPlay
-                  playsInline
-                  muted
-                />
-              ) : (
-                <div 
-                  id="interactive-barcode-fallback-viewfinder" 
-                  className="w-full h-full object-cover block"
-                />
-              )}
+              {/* Native video element — always mounted so BarcodeDetector RAF loop can reference it */}
+              <video
+                ref={videoRef}
+                id={NATIVE_VIDEO_ID}
+                className={`w-full h-full object-cover ${useNativeVideo ? 'block' : 'hidden'}`}
+                autoPlay
+                playsInline
+                muted
+              />
 
-              {/* Success Green Flash Animation with Recognition Source Badge */}
+              {/* Html5Qrcode fallback container — always mounted, visible when native not available */}
+              <div
+                id={H5Q_CONTAINER_ID}
+                className={`w-full h-full ${useNativeVideo ? 'hidden' : 'block'}`}
+              />
+
+              {/* Success flash */}
               <AnimatePresence>
                 {detectionSuccess && (
                   <motion.div
@@ -793,78 +635,47 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                     >
                       <CheckCircle2 size={36} />
                     </motion.div>
-                    <span className="mt-3 text-sm font-black uppercase tracking-widest text-white drop-shadow-md flex items-center gap-1.5">
-                      {decodedVia === 'ocr' ? <Type size={16} /> : <Barcode size={16} />}
-                      {decodedVia === 'ocr' ? '✓ Decoded via Number OCR' : '✓ Decoded via Zebra Bars'}
-                    </span>
-                    <span className="text-[10px] text-white/90 font-medium">
-                      GS1 Modulo-10 Checksum Verified
+                    <span className="mt-3 text-sm font-black uppercase tracking-widest text-white drop-shadow-md">
+                      ✓ Barcode Scanned!
                     </span>
                   </motion.div>
                 )}
               </AnimatePresence>
 
-              {/* Aiming Reticle: Dual Target for Zebra Bars & Numbers Below */}
+              {/* Scanning reticle (only when camera is live and not yet successful) */}
               {cameraActive && !detectionSuccess && (
                 <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-4 z-20">
-                  {/* Top Status */}
-                  <div className="flex justify-between items-center">
+                  <div className="flex justify-center">
                     <span className="text-[10px] font-black uppercase tracking-wider text-emerald-400 bg-black/80 px-3 py-1 rounded-full border border-emerald-500/30 backdrop-blur-xs flex items-center gap-1.5 shadow-lg">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-                      ⚡ Dual Engine: Zebra Bars + Number OCR Active
-                    </span>
-                    <span className="text-[10px] font-bold text-white/80 bg-black/70 px-2 py-0.5 rounded-md backdrop-blur-xs">
-                      Auto-Focus Continuous
+                      Scanning — Point at any barcode
                     </span>
                   </div>
 
-                  {/* Dual-Target Crosshairs Reticle */}
-                  <div className="relative w-full max-w-[340px] aspect-[16/10] mx-auto flex flex-col items-center justify-center">
-                    {/* Corner Reticles */}
+                  {/* Scanning laser line */}
+                  <div className="relative w-full max-w-[320px] h-32 mx-auto flex items-center justify-center">
+                    {/* Corner markers */}
                     <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-red-500 rounded-tl-lg" />
                     <div className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-red-500 rounded-tr-lg" />
                     <div className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-red-500 rounded-bl-lg" />
                     <div className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-red-500 rounded-br-lg" />
-
-                    {/* Upper Target Zone: Zebra Bars Scanner */}
-                    <div className="relative w-full h-[60%] flex items-center justify-center">
-                      <motion.div
-                        animate={{
-                          y: [-35, 35, -35],
-                        }}
-                        transition={{
-                          repeat: Infinity,
-                          duration: 1.8,
-                          ease: "easeInOut"
-                        }}
-                        className="w-full h-0.5 bg-red-500 shadow-[0_0_12px_#ef4444,0_0_24px_#dc2626]"
-                      />
-                      <span className="absolute top-2 right-3 text-[9px] font-mono text-red-400/80 bg-black/60 px-1.5 py-0.5 rounded">
-                        Zebra Pattern Focus
-                      </span>
-                    </div>
-
-                    {/* Lower Target Zone: Human-Readable Digits Guideline */}
-                    <div className="w-full h-[40%] border-t border-dashed border-amber-400/40 flex items-center justify-between px-3 bg-amber-500/5">
-                      <span className="text-[9px] font-black uppercase tracking-wider text-amber-400/90 flex items-center gap-1">
-                        <Type size={10} /> OCR Digit Reader
-                      </span>
-                      <span className="text-[8px] font-mono text-white/60">
-                        [8901262010125]
-                      </span>
-                    </div>
+                    {/* Laser sweep */}
+                    <motion.div
+                      animate={{ y: [-50, 50, -50] }}
+                      transition={{ repeat: Infinity, duration: 1.8, ease: 'easeInOut' }}
+                      className="w-full h-0.5 bg-red-500 shadow-[0_0_10px_#ef4444,0_0_20px_#dc2626]"
+                    />
                   </div>
 
-                  {/* Bottom Guide */}
                   <div className="text-center">
                     <span className="text-[10px] text-white/80 bg-black/80 px-3.5 py-1 rounded-full backdrop-blur-xs border border-white/10 shadow-lg">
-                      Point at either Zebra Bars or printed numbers • Auto-decoded instantly
+                      Hold steady • No alignment needed • Auto-detects instantly
                     </span>
                   </div>
                 </div>
               )}
 
-              {/* Error fallback if camera is blocked/unavailable */}
+              {/* Error overlay */}
               {cameraError && (
                 <div className="absolute inset-0 bg-slate-950/95 flex flex-col items-center justify-center p-6 text-center text-slate-300 space-y-3 z-20">
                   <AlertCircle size={36} className="text-amber-400" />
@@ -880,20 +691,20 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               )}
             </div>
 
-            {/* Hidden File Upload for barcode photos */}
-            <input 
+            {/* Hidden file input */}
+            <input
               ref={fileInputRef}
-              type="file" 
-              accept="image/*" 
-              className="hidden" 
-              onChange={handleImageUpload} 
+              type="file"
+              accept="image/*"
+              className="hidden"
+              onChange={handleImageUpload}
             />
 
-            {/* 1-Click Test Simulator for QA & Testing */}
+            {/* Quick-test barcodes */}
             <div className="pt-2 border-t border-slate-100 dark:border-white/5 space-y-2">
               <div className="flex items-center justify-between">
                 <p className="text-[10px] font-black uppercase tracking-wider text-slate-400 dark:text-gray-500 flex items-center gap-1.5">
-                  <Sparkles size={12} className="text-amber-500" /> 1-Click QA Simulation Barcodes
+                  <Sparkles size={12} className="text-amber-500" /> Quick Test Barcodes
                 </p>
                 <button
                   type="button"
@@ -908,11 +719,9 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   <button
                     key={item.code}
                     type="button"
-                    onClick={() => {
-                      triggerScanSuccess(item.code, 'barcode');
-                    }}
+                    onClick={() => triggerScanSuccess(item.code)}
                     className="px-2.5 py-1 rounded-xl text-[11px] font-medium bg-slate-100 dark:bg-[#1E1E1E] hover:bg-blue-50 dark:hover:bg-blue-950/40 hover:text-blue-600 dark:hover:text-blue-400 border border-slate-200/80 dark:border-white/5 transition-all text-slate-700 dark:text-gray-300 flex items-center gap-1.5 cursor-pointer"
-                    title={`Click to simulate scanning ${item.code}`}
+                    title={`Simulate scan: ${item.code}`}
                   >
                     <span className="font-bold">{item.name}</span>
                     <span className="text-[9px] font-mono opacity-60">({item.tag})</span>
