@@ -48,7 +48,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
   const [manualCode, setManualCode] = useState('');
   const [devices, setDevices] = useState<CameraDevice[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState<string>('');
-  const [activeEngine, setActiveEngine] = useState<'native' | 'html5qrcode' | null>(null);
+  const [activeEngine, setActiveEngine] = useState<'native' | 'html5qrcode'>('native');
   const [hasTorch, setHasTorch] = useState(false);
   const [torchOn, setTorchOn] = useState(false);
   const [detectionSuccess, setDetectionSuccess] = useState(false);
@@ -103,7 +103,6 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
     setCameraActive(false);
     setHasTorch(false);
     setTorchOn(false);
-    setActiveEngine(null);
     isStoppingRef.current = false;
   }, []);
 
@@ -185,7 +184,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
 
   // --- Tier 1: Native BarcodeDetector Engine ---
   const startNativeEngine = async (deviceIdToUse?: string): Promise<boolean> => {
-    if (!('BarcodeDetector' in window)) {
+    if (typeof window === 'undefined' || !('BarcodeDetector' in window)) {
       return false;
     }
 
@@ -202,13 +201,13 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         formats: formats.length > 0 ? formats : undefined
       });
 
+      const hasExactId = Boolean(deviceIdToUse && deviceIdToUse.trim().length > 0);
       const constraints: MediaStreamConstraints = {
         video: {
-          deviceId: deviceIdToUse ? { exact: deviceIdToUse } : undefined,
-          facingMode: deviceIdToUse ? undefined : { ideal: 'environment' },
-          width: { ideal: 1920, min: 1280 },
-          height: { ideal: 1080, min: 720 },
-          frameRate: { ideal: 60, min: 30 }
+          deviceId: hasExactId ? { exact: deviceIdToUse } : undefined,
+          facingMode: hasExactId ? undefined : { ideal: 'environment' },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 }
         },
         audio: false
       };
@@ -224,19 +223,16 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
         return false;
       }
 
+      // Attach stream directly - video element is fully visible in DOM
       video.srcObject = stream;
       video.setAttribute('playsinline', 'true');
       video.muted = true;
 
-      await new Promise<void>((resolve) => {
-        if (video.readyState >= 2) {
-          resolve();
-        } else {
-          video.onloadeddata = () => resolve();
-        }
-      });
-
-      await video.play();
+      try {
+        await video.play();
+      } catch (playErr) {
+        console.warn("Video play error (will autoplay on interaction):", playErr);
+      }
 
       setCameraActive(true);
       setActiveEngine('native');
@@ -258,7 +254,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           lastFpsCheck = now;
         }
 
-        if (!detecting && video.readyState === video.HAVE_ENOUGH_DATA) {
+        if (!detecting && video.readyState >= 2) {
           detecting = true;
           try {
             const barcodes = await detector.detect(video);
@@ -311,18 +307,17 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
           Html5QrcodeSupportedFormats.UPC_E,
           Html5QrcodeSupportedFormats.QR_CODE
         ],
-        verbose: false,
-        useBarCodeDetectorIfSupported: true
+        verbose: false
       });
       html5QrCodeRef.current = html5QrCode;
 
-      const cameraConfig = deviceIdToUse ? { deviceId: { exact: deviceIdToUse } } : { facingMode: "environment" };
+      const hasExactId = Boolean(deviceIdToUse && deviceIdToUse.trim().length > 0);
+      const cameraConfig = hasExactId ? { deviceId: { exact: deviceIdToUse } } : { facingMode: "environment" };
 
       await html5QrCode.start(
         cameraConfig,
         {
-          fps: 30,
-          aspectRatio: 1.333333,
+          fps: 25,
           disableFlip: false
         },
         (decodedText) => {
@@ -359,7 +354,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
 
     // Populate camera list
     const devs = await enumerateCameras();
-    const effectiveDeviceId = deviceId || (devs.length > 0 ? devs[0].id : undefined);
+    const effectiveDeviceId = deviceId !== undefined ? deviceId : (devs.length > 0 ? devs[0].id : '');
     if (effectiveDeviceId) {
       setSelectedDeviceId(effectiveDeviceId);
     }
@@ -446,6 +441,8 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
 
   if (!isOpen) return null;
 
+  const isNativeVisionSupported = typeof window !== 'undefined' && 'BarcodeDetector' in window;
+
   return (
     <AnimatePresence>
       <div 
@@ -470,12 +467,10 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   <h3 className="text-base font-bold text-slate-900 dark:text-white">
                     Industrial Barcode Engine
                   </h3>
-                  {activeEngine && (
-                    <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
-                      <Cpu size={10} />
-                      {activeEngine === 'native' ? 'Native GPU' : 'Wasm 60fps'}
-                    </span>
-                  )}
+                  <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wider bg-blue-500/10 text-blue-400 border border-blue-500/20 flex items-center gap-1">
+                    <Cpu size={10} />
+                    {activeEngine === 'native' ? 'Native GPU' : 'Auto Vision'}
+                  </span>
                 </div>
                 <p className="text-xs text-slate-500 dark:text-gray-400">
                   Full 1080p scan matrix with hardware auto-focus
@@ -540,7 +535,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                   type="button"
                   onClick={() => bootScanner(selectedDeviceId)}
                   title="Reconnect Camera"
-                  className="p-1.5 text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors"
+                  className="p-1.5 text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors cursor-pointer"
                 >
                   <RefreshCw size={14} />
                 </button>
@@ -576,22 +571,23 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
               </div>
             </form>
 
-            {/* Camera Viewfinder Box with Industrial Laser & Corner Crosshairs */}
+            {/* Camera Viewfinder Box with Direct Video Stream & Corner Crosshairs */}
             <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden bg-black border border-slate-200 dark:border-white/10 flex items-center justify-center shadow-2xl">
-              {/* Native Engine HTMLVideoElement */}
-              <video
-                ref={videoRef}
-                className={`w-full h-full object-cover ${activeEngine === 'native' ? 'block' : 'hidden'}`}
-                autoPlay
-                playsInline
-                muted
-              />
-
-              {/* Fallback Engine Container */}
-              <div 
-                id="interactive-barcode-fallback-viewfinder" 
-                className={`w-full h-full object-cover ${activeEngine === 'html5qrcode' ? 'block' : 'hidden'}`}
-              />
+              {/* Native Engine HTMLVideoElement - Always mounted and fully visible */}
+              {isNativeVisionSupported ? (
+                <video
+                  ref={videoRef}
+                  className="w-full h-full object-cover block"
+                  autoPlay
+                  playsInline
+                  muted
+                />
+              ) : (
+                <div 
+                  id="interactive-barcode-fallback-viewfinder" 
+                  className="w-full h-full object-cover block"
+                />
+              )}
 
               {/* Success Green Flash Animation */}
               <AnimatePresence>
@@ -616,7 +612,7 @@ export const BarcodeCameraModal: React.FC<BarcodeCameraModalProps> = ({
                 )}
               </AnimatePresence>
 
-              {/* Industrial Aiming HUD & Visual Laser Line */}
+              {/* Aiming Reticle & Animated Laser Line */}
               {cameraActive && !detectionSuccess && (
                 <div className="absolute inset-0 pointer-events-none flex flex-col justify-between p-4 z-20">
                   {/* Top Status */}
