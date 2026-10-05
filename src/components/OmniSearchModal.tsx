@@ -220,6 +220,22 @@ export const OmniSearchModal: React.FC<OmniSearchModalProps> = ({
     window.open(url, '_blank');
   };
 
+  // Global window Escape key listener (capture phase so it intercepts immediately even when input has focus)
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown, true);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
+  }, [isOpen, onClose]);
+
   // Keyboard Navigation
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
@@ -247,6 +263,8 @@ export const OmniSearchModal: React.FC<OmniSearchModalProps> = ({
         }
       }
     } else if (e.key === 'Escape') {
+      e.preventDefault();
+      e.stopPropagation();
       onClose();
     }
   };
@@ -254,13 +272,19 @@ export const OmniSearchModal: React.FC<OmniSearchModalProps> = ({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[250] flex items-start justify-center pt-16 md:pt-24 px-4 bg-black/70 backdrop-blur-md">
+    <div 
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-[250] flex items-start justify-center pt-16 md:pt-24 px-4 bg-black/70 backdrop-blur-md cursor-pointer"
+    >
       <motion.div
+        onClick={(e) => e.stopPropagation()}
         initial={{ opacity: 0, scale: 0.96, y: -10 }}
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.96, y: -10 }}
         transition={{ duration: 0.15 }}
-        className="w-full max-w-xl bg-white dark:bg-[#111111] border border-slate-200 dark:border-white/10 rounded-[28px] shadow-2xl overflow-hidden flex flex-col text-slate-900 dark:text-white"
+        className="w-full max-w-xl bg-white dark:bg-[#111111] border border-slate-200 dark:border-white/10 rounded-[28px] shadow-2xl overflow-hidden flex flex-col text-slate-900 dark:text-white cursor-default"
         onKeyDown={handleKeyDown}
       >
         {/* Search Bar Input */}
@@ -273,6 +297,13 @@ export const OmniSearchModal: React.FC<OmniSearchModalProps> = ({
             onChange={(e) => {
               setQuery(e.target.value);
               setSelectedIndex(0);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                e.stopPropagation();
+                onClose();
+              }
             }}
             placeholder="Type a product, customer name, barcode, or command..."
             className="w-full bg-transparent border-none outline-none text-sm md:text-base font-medium placeholder:text-slate-400 dark:placeholder:text-gray-600 text-slate-900 dark:text-white"

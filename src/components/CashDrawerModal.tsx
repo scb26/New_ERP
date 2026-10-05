@@ -163,8 +163,19 @@ export const CashDrawerModal: React.FC<CashDrawerModalProps> = ({ isOpen, onClos
       setError(null);
       setSuccessMsg(null);
       setActiveZReport(null);
+
+      const handleGlobalKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          onClose();
+        }
+      };
+
+      window.addEventListener('keydown', handleGlobalKeyDown, true);
+      return () => window.removeEventListener('keydown', handleGlobalKeyDown, true);
     }
-  }, [isOpen]);
+  }, [isOpen, onClose]);
 
   // Denominations Total Calculation
   const denominationTotal = Object.entries(denominations).reduce((acc, [denom, count]) => {
@@ -309,12 +320,18 @@ export const CashDrawerModal: React.FC<CashDrawerModalProps> = ({ isOpen, onClos
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[150] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
+    <div 
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-[150] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto cursor-pointer"
+    >
       <motion.div 
+        onClick={(e) => e.stopPropagation()}
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.95, opacity: 0 }}
-        className="bg-white dark:bg-[#0E0E0E] border border-slate-200 dark:border-white/10 rounded-[32px] w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl my-auto text-slate-900 dark:text-white"
+        className="bg-white dark:bg-[#0E0E0E] border border-slate-200 dark:border-white/10 rounded-[32px] w-full max-w-2xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl my-auto text-slate-900 dark:text-white cursor-default"
       >
         {/* Header Bar */}
         <div className="p-5 md:p-6 border-b border-slate-100 dark:border-white/5 flex items-center justify-between shrink-0 bg-slate-50 dark:bg-[#141414]">
