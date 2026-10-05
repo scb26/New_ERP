@@ -56,6 +56,9 @@ export default function QuickBill() {
 
   // Barcode Lookup & Quick-Add Counter State
   const [quickAddModalOpen, setQuickAddModalOpen] = useState(false);
+  const [editingPriceId, setEditingPriceId] = useState<string | null>(null);
+  const [editPriceVal, setEditPriceVal] = useState<string>('');
+  const [saveToInventory, setSaveToInventory] = useState<boolean>(false);
   const [quickAddBarcode, setQuickAddBarcode] = useState('');
   const [quickAddInitialData, setQuickAddInitialData] = useState<any>(null);
   const [isLookingUpBarcode, setIsLookingUpBarcode] = useState(false);
@@ -345,6 +348,39 @@ export default function QuickBill() {
 
   const removeFromCart = (id: string) => {
     setCart(cart.filter(item => item.id !== id));
+  };
+
+  const startEditingPrice = (item: any) => {
+    setEditingPriceId(item.id);
+    setEditPriceVal(String(item.price));
+    setSaveToInventory(false);
+  };
+
+  const commitPriceEdit = async (item: any) => {
+    const newPrice = Number(editPriceVal);
+    if (!isNaN(newPrice) && newPrice >= 0) {
+      setCart(cart.map(c => c.id === item.id ? { ...c, price: newPrice } : c));
+      
+      if (saveToInventory && item.id.startsWith('PROD-')) {
+        try {
+          const res = await fetch(`/api/products/${item.id}`, {
+            headers: { ...(token ? {'Authorization': `Bearer ${token}`} : {}) }
+          });
+          if (res.ok) {
+             const prodData = await res.json();
+             await fetch(`/api/products/${item.id}`, {
+               method: 'PUT',
+               headers: { 'Content-Type': 'application/json', ...(token ? {'Authorization': `Bearer ${token}`} : {}) },
+               body: JSON.stringify({ ...prodData, sellPrice: newPrice, mrp: newPrice })
+             });
+             fetchProducts();
+          }
+        } catch (e) {
+          console.error('Failed to update inventory price', e);
+        }
+      }
+    }
+    setEditingPriceId(null);
   };
 
   const clearCart = () => {
@@ -779,12 +815,53 @@ export default function QuickBill() {
               >
                 <div className="flex-1 min-w-0">
                   <h4 className="text-sm font-bold truncate text-slate-900 dark:text-gray-200 tracking-tight">{item.name}</h4>
-                  <div className="flex items-center gap-2 mt-0.5">
-                    <p className="text-xs text-blue-600 dark:text-blue-500 font-black">₹{(item.price * item.qty).toLocaleString()}</p>
-                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
-                      +{item.gstRate !== undefined ? item.gstRate : 18}% GST
-                    </span>
-                  </div>
+                  
+                  {editingPriceId === item.id ? (
+                    <div className="mt-1 flex flex-col gap-1.5 items-start">
+                      <div className="flex items-center gap-1 bg-white dark:bg-[#1A1A1A] rounded p-1 border border-blue-500 shadow-sm">
+                        <span className="text-xs text-slate-500 px-1">₹</span>
+                        <input 
+                          autoFocus
+                          type="number" 
+                          value={editPriceVal}
+                          onChange={(e) => setEditPriceVal(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') commitPriceEdit(item);
+                            if (e.key === 'Escape') setEditingPriceId(null);
+                          }}
+                          onBlur={() => commitPriceEdit(item)}
+                          className="w-16 text-xs font-black outline-none bg-transparent text-blue-600 dark:text-blue-400 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                        />
+                      </div>
+                      <label className="flex items-center gap-1.5 cursor-pointer">
+                        <input 
+                          type="checkbox" 
+                          checked={saveToInventory} 
+                          onMouseDown={(e) => {
+                             e.preventDefault(); 
+                             setSaveToInventory(!saveToInventory);
+                          }}
+                          onChange={() => {}} 
+                          className="w-3 h-3 rounded text-blue-600 border-gray-300 focus:ring-blue-500" 
+                        />
+                        <span className="text-[9px] font-bold uppercase tracking-wider text-gray-500 dark:text-gray-400">Save to inventory</span>
+                      </label>
+                    </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2 mt-0.5">
+                      <button 
+                        type="button"
+                        onClick={() => startEditingPrice(item)}
+                        className="text-xs text-blue-600 dark:text-blue-500 font-black hover:underline cursor-pointer flex items-center gap-0.5"
+                        title="Click to edit price"
+                      >
+                        ₹{item.price.toLocaleString()} {item.qty > 1 && <span className="text-[9px] text-slate-400 font-medium">x {item.qty} = ₹{(item.price * item.qty).toLocaleString()}</span>}
+                      </button>
+                      <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                        +{item.gstRate !== undefined ? item.gstRate : 18}% GST
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 {/* Direct Quantity Input + Incrementor */}
