@@ -24,6 +24,8 @@ import { Html5QrcodeScanner } from 'html5-qrcode';
 import ThermalReceiptModal, { ReceiptData } from './ThermalReceiptModal';
 import LocalQRCode from './LocalQRCode';
 import CashDrawerModal from './CashDrawerModal';
+import { QuickAddProductModal } from './QuickAddProductModal';
+import { playScanSuccessSound, playScanAlertSound } from '../utils/audio';
 import { useAuth } from '../context/AuthContext';
 
 export default function QuickBill() {
@@ -43,6 +45,13 @@ export default function QuickBill() {
   // Cash Register Shift state
   const [activeShift, setActiveShift] = useState<any>(null);
   const [showDrawerModal, setShowDrawerModal] = useState(false);
+
+  // Barcode Lookup & Quick-Add Counter State
+  const [quickAddModalOpen, setQuickAddModalOpen] = useState(false);
+  const [quickAddBarcode, setQuickAddBarcode] = useState('');
+  const [quickAddInitialData, setQuickAddInitialData] = useState<any>(null);
+  const [isLookingUpBarcode, setIsLookingUpBarcode] = useState(false);
+  const [scanNotification, setScanNotification] = useState<{ message: string; type: 'success' | 'alert' | 'info' } | null>(null);
 
   // Multi-tender split state
   const [splitCash, setSplitCash] = useState<number>(0);
@@ -88,9 +97,66 @@ export default function QuickBill() {
       .then(data => setProducts(data));
   };
 
+  // Hybrid Barcode Scanner Engine: Local Products -> Local Offline Master -> Open Food Facts API
+  const handleBarcodeScan = async (scannedCode: string) => {
+    if (!scannedCode || scannedCode.trim().length < 3) return;
+    const cleanCode = scannedCode.trim();
+
+    // 1. Check if item already exists in local active products
+    const matched = products.find(
+      p => p.barcode === cleanCode || p.id === cleanCode || p.name.toLowerCase() === cleanCode.toLowerCase()
+    );
+    if (matched) {
+      playScanSuccessSound();
+      addToCart(matched);
+      setScanNotification({ message: `Added to cart: ${matched.name}`, type: 'success' });
+      setTimeout(() => setScanNotification(null), 2500);
+      return;
+    }
+
+    // 2. Barcode is unmapped in active store catalog -> Trigger hybrid lookup
+    playScanAlertSound();
+    try {
+      setIsLookingUpBarcode(true);
+      setScanNotification({ message: `🔍 Looking up barcode ${cleanCode}...`, type: 'info' });
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch(`/api/barcode/lookup/${encodeURIComponent(cleanCode)}`, { headers });
+      const data = await res.json();
+      setScanNotification(null);
+
+      setQuickAddBarcode(cleanCode);
+      if (data.found && data.product) {
+        setQuickAddInitialData({
+          ...data.product,
+          source: data.source
+        });
+      } else {
+        setQuickAddInitialData({
+          barcode: cleanCode,
+          name: '',
+          source: 'none'
+        });
+      }
+      setQuickAddModalOpen(true);
+    } catch (err) {
+      console.error("Barcode lookup failed:", err);
+      setScanNotification(null);
+      setQuickAddBarcode(cleanCode);
+      setQuickAddInitialData({ barcode: cleanCode, name: '', source: 'none' });
+      setQuickAddModalOpen(true);
+    } finally {
+      setIsLookingUpBarcode(false);
+    }
+  };
+
   // 1. Hardware Barcode Scanner Buffer Listener & Keyboard Hotkeys (F2, Esc, Enter)
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if QuickAddModal is currently open
+      if (quickAddModalOpen) return;
+
       // Hotkey F2: Focus product search
       if (e.key === 'F2') {
         e.preventDefault();
@@ -132,14 +198,9 @@ export default function QuickBill() {
         const scannedCode = barcodeBufferRef.current.trim();
         barcodeBufferRef.current = '';
         if (scannedCode.length >= 3) {
-          const matched = products.find(
-            p => p.barcode === scannedCode || p.id === scannedCode || p.name.toLowerCase() === scannedCode.toLowerCase()
-          );
-          if (matched) {
-            addToCart(matched);
-            if (isInputFocused && document.activeElement === searchInputRef.current) {
-              setSearchTerm('');
-            }
+          handleBarcodeScan(scannedCode);
+          if (isInputFocused && document.activeElement === searchInputRef.current) {
+            setSearchTerm('');
           }
         }
       } else if (e.key.length === 1) {
@@ -155,7 +216,7 @@ export default function QuickBill() {
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [products, showCheckoutModal, paymentMethod, loading, isScanning, searchTerm]);
+  }, [products, showCheckoutModal, paymentMethod, loading, isScanning, searchTerm, quickAddModalOpen]);
 
   // 2. Camera Barcode Scanner
   useEffect(() => {
@@ -168,14 +229,10 @@ export default function QuickBill() {
       );
       
       scanner.render((decodedText) => {
-        const product = products.find(
-          p => p.id === decodedText || p.barcode === decodedText || p.name.toLowerCase() === decodedText.toLowerCase()
-        );
-        if (product) {
-          addToCart(product);
-          setIsScanning(false);
-          scanner?.clear();
-        }
+        const cleanCode = decodedText.trim();
+        setIsScanning(false);
+        scanner?.clear();
+        handleBarcodeScan(cleanCode);
       }, () => {
         // quiet
       });
@@ -381,6 +438,27 @@ export default function QuickBill() {
               className="w-full bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-2xl pl-12 pr-16 py-4 focus:outline-none focus:border-blue-500/50 transition-all font-medium text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-gray-600 shadow-xs dark:shadow-none"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && searchTerm.trim()) {
+                  e.preventDefault();
+                  const term = searchTerm.trim();
+                  const exact = filteredProducts.find(
+                    p => p.barcode === term || p.id === term || p.name.toLowerCase() === term.toLowerCase()
+                  );
+                  if (exact) {
+                    playScanSuccessSound();
+                    addToCart(exact);
+                    setSearchTerm('');
+                  } else if (filteredProducts.length === 1) {
+                    playScanSuccessSound();
+                    addToCart(filteredProducts[0]);
+                    setSearchTerm('');
+                  } else {
+                    setSearchTerm('');
+                    handleBarcodeScan(term);
+                  }
+                }
+              }}
             />
             <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-white/10 text-slate-500 dark:text-gray-400 hidden sm:inline-block">
               F2
@@ -1063,6 +1141,38 @@ export default function QuickBill() {
           onClose={() => setActiveReceipt(null)} 
         />
       )}
+
+      {/* Barcode Quick-Add Counter Modal */}
+      <QuickAddProductModal
+        isOpen={quickAddModalOpen}
+        barcode={quickAddBarcode}
+        initialData={quickAddInitialData}
+        onClose={() => setQuickAddModalOpen(false)}
+        onSuccess={(newProduct) => {
+          fetchProducts();
+          addToCart(newProduct);
+        }}
+      />
+
+      {/* Scan Status Toast Notification */}
+      <AnimatePresence>
+        {scanNotification && (
+          <motion.div
+            initial={{ opacity: 0, y: 20, scale: 0.95 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 15, scale: 0.95 }}
+            className={`fixed bottom-6 right-6 z-[260] px-5 py-3 rounded-2xl shadow-xl flex items-center gap-3 text-xs font-bold border backdrop-blur-md ${
+              scanNotification.type === 'success' 
+                ? 'bg-emerald-600 text-white border-emerald-400/40 shadow-emerald-900/30'
+                : scanNotification.type === 'alert'
+                ? 'bg-amber-600 text-white border-amber-400/40 shadow-amber-900/30'
+                : 'bg-slate-900 dark:bg-slate-800 text-white border-white/10 shadow-black/40'
+            }`}
+          >
+            <span>{scanNotification.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

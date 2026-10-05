@@ -7,6 +7,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
 import { DatabaseSync } from "node:sqlite";
+import { SEED_BARCODE_MASTER } from "./server_barcode_seed";
 dotenv.config({ path: ".env.local" });
 
 const __filename = fileURLToPath(import.meta.url);
@@ -171,6 +172,23 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_shifts_user_status ON cash_shifts (user_id, status);
   CREATE INDEX IF NOT EXISTS idx_drawer_shift ON cash_drawer_transactions (shift_id);
+
+  CREATE TABLE IF NOT EXISTS barcode_master (
+    barcode TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    brand TEXT,
+    category TEXT DEFAULT 'General',
+    default_mrp REAL DEFAULT 0,
+    default_cost REAL DEFAULT 0,
+    default_hsn TEXT DEFAULT '',
+    default_gst REAL DEFAULT 18,
+    source TEXT DEFAULT 'offline_catalog',
+    image_url TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_barcode_master_name ON barcode_master(name);
 `);
 
 // Safe migrations for existing databases
@@ -216,6 +234,36 @@ if (!existingSettings) {
     phone: "9876543210"
   };
   db.prepare("INSERT INTO settings (key, value_json) VALUES ('company', ?)").run(JSON.stringify(defaultSettings));
+}
+
+// Seed Master Barcode Catalog (Indian FMCG, Grocery, Packaged Goods)
+try {
+  const masterCount = (db.prepare("SELECT count(*) as count FROM barcode_master").get() as { count: number }).count;
+  if (masterCount === 0) {
+    const insertMasterStmt = db.prepare(`
+      INSERT OR REPLACE INTO barcode_master (
+        barcode, name, brand, category, default_mrp, default_cost, default_hsn, default_gst, source, image_url, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pre_seeded', ?, ?, ?)
+    `);
+    const seedNow = new Date().toISOString();
+    for (const item of SEED_BARCODE_MASTER) {
+      insertMasterStmt.run(
+        item.barcode,
+        item.name,
+        item.brand,
+        item.category,
+        item.defaultMrp,
+        item.defaultCost,
+        item.defaultHsn,
+        item.defaultGst,
+        item.imageUrl || '',
+        seedNow,
+        seedNow
+      );
+    }
+  }
+} catch (seedErr) {
+  console.error("Failed to seed barcode master catalog:", seedErr);
 }
 
 // Auto-migration from store.json if products table is empty
@@ -646,6 +694,203 @@ async function startServer() {
         logAudit("DELETE", "Product", id, { deleted: existing }, req.user?.username || 'system');
       }
       res.status(204).send();
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- BARCODE LOOKUP ENGINE (Hybrid: Local Products -> Local Master -> Open Food Facts) ---
+
+  // GET /api/barcode/lookup/:code
+  app.get("/api/barcode/lookup/:code", async (req: any, res) => {
+    try {
+      const code = String(req.params.code).trim();
+      if (!code) {
+        return res.status(400).json({ error: "Barcode parameter is required" });
+      }
+
+      // Tier 1: Check Active Store Inventory (0ms)
+      const existingProd = db.prepare(`
+        SELECT * FROM products WHERE barcode = ? OR id = ?
+      `).get(code, code) as any;
+
+      if (existingProd) {
+        return res.json({
+          status: 'in_inventory',
+          found: true,
+          source: 'inventory',
+          product: mapProductRow(existingProd)
+        });
+      }
+
+      // Tier 2: Check Pre-seeded Local Offline Master Catalog (0ms)
+      const masterRow = db.prepare(`
+        SELECT * FROM barcode_master WHERE barcode = ?
+      `).get(code) as any;
+
+      if (masterRow) {
+        return res.json({
+          status: 'in_master',
+          found: true,
+          source: masterRow.source || 'offline_master',
+          product: {
+            id: `PROD-${Date.now()}`,
+            name: masterRow.name,
+            barcode: masterRow.barcode,
+            brand: masterRow.brand || '',
+            category: masterRow.category || 'General',
+            mrp: Number(masterRow.default_mrp || 0),
+            sellPrice: Number(masterRow.default_mrp || 0),
+            costPrice: Number(masterRow.default_cost || 0),
+            hsnCode: masterRow.default_hsn || '',
+            gstRate: Number(masterRow.default_gst ?? 18),
+            stock: 10,
+            image: masterRow.image_url || ''
+          }
+        });
+      }
+
+      // Tier 3: Asynchronous Online Open Food Facts API (with 3.5s timeout)
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3500);
+
+        const offResponse = await fetch(`https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json`, {
+          headers: {
+            'User-Agent': 'UnidexERP/1.5.0 (https://github.com/scb26/New_ERP; store-counter@unidex.local)'
+          },
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (offResponse.ok) {
+          const offData = await offResponse.json() as any;
+          if (offData.status === 1 && offData.product) {
+            const p = offData.product;
+            const name = p.product_name || p.product_name_en || (p.brands ? `${p.brands} ${p.quantity || ''}`.trim() : `Item ${code}`);
+            const brand = p.brands || '';
+            const category = p.categories ? p.categories.split(',')[0].trim() : 'Grocery';
+            const image = p.image_front_url || p.image_url || '';
+            
+            // Heuristic GST inference for packaged grocery items
+            let inferredGst = 12;
+            const catLower = (category + ' ' + name).toLowerCase();
+            if (catLower.includes('milk') || catLower.includes('atta') || catLower.includes('rice') || catLower.includes('oil') || catLower.includes('salt')) {
+              inferredGst = 5;
+            } else if (catLower.includes('soap') || catLower.includes('shampoo') || catLower.includes('paste') || catLower.includes('cleaner') || catLower.includes('detergent')) {
+              inferredGst = 18;
+            }
+
+            // SIMULTANEOUSLY save to local SQLite barcode_master so future lookups are 0ms offline!
+            const nowIso = new Date().toISOString();
+            db.prepare(`
+              INSERT OR REPLACE INTO barcode_master (
+                barcode, name, brand, category, default_mrp, default_cost, default_hsn, default_gst, source, image_url, created_at, updated_at
+              ) VALUES (?, ?, ?, ?, 0, 0, ?, ?, 'open_food_facts', ?, ?, ?)
+            `).run(code, name, brand, category, '1905', inferredGst, image, nowIso, nowIso);
+
+            return res.json({
+              status: 'in_master',
+              found: true,
+              source: 'open_food_facts',
+              product: {
+                id: `PROD-${Date.now()}`,
+                name,
+                barcode: code,
+                brand,
+                category,
+                mrp: 0,
+                sellPrice: 0,
+                costPrice: 0,
+                hsnCode: '1905',
+                gstRate: inferredGst,
+                stock: 10,
+                image
+              }
+            });
+          }
+        }
+      } catch (_offErr) {
+        // Offline or request timed out; safely proceed to not_found
+      }
+
+      // Barcode not found in any tier
+      return res.json({
+        status: 'not_found',
+        found: false,
+        source: 'none',
+        barcode: code
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/products/quick-add: Counter quick-register endpoint accessible to cashiers & admins
+  app.post("/api/products/quick-add", requireAuth, (req: any, res) => {
+    try {
+      const p = req.body;
+      const id = p.id ? String(p.id) : `PROD-${Date.now()}`;
+      const now = new Date().toISOString();
+      const sellPrice = Number(p.sellPrice || p.mrp || 0);
+      const mrp = p.mrp !== undefined && p.mrp !== null ? Number(p.mrp) : sellPrice;
+      const costPrice = Number(p.costPrice || (sellPrice > 0 ? Math.round(sellPrice * 0.8) : 0));
+      const stock = p.stock !== undefined ? Number(p.stock) : 10;
+      const gstRate = Number(p.gstRate ?? 18);
+      const hsnCode = p.hsnCode ? String(p.hsnCode).trim() : '';
+      const barcode = p.barcode ? String(p.barcode).trim() : '';
+      const name = String(p.name || '').trim();
+      const category = p.category || 'General';
+      const image = p.image || '';
+
+      if (!name) {
+        return res.status(400).json({ error: "Product name is required." });
+      }
+      if (sellPrice <= 0) {
+        return res.status(400).json({ error: "Selling price must be greater than zero." });
+      }
+
+      // 1. Insert into active store inventory
+      db.prepare(`
+        INSERT OR REPLACE INTO products (
+          id, name, barcode, hsn_code, gst_rate, cost_price, sell_price, mrp,
+          discount, discount_type, stock, category, image, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'amount', ?, ?, ?, ?)
+      `).run(id, name, barcode, hsnCode, gstRate, costPrice, sellPrice, mrp, stock, category, image, now);
+
+      // 2. SIMULTANEOUSLY save/update in barcode_master database so it's remembered offline forever
+      if (barcode) {
+        db.prepare(`
+          INSERT OR REPLACE INTO barcode_master (
+            barcode, name, brand, category, default_mrp, default_cost, default_hsn, default_gst, source, image_url, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'merchant_custom', ?, ?, ?)
+        `).run(barcode, name, p.brand || '', category, mrp, costPrice, hsnCode, gstRate, image, now, now);
+      }
+
+      const created = mapProductRow(db.prepare("SELECT * FROM products WHERE id = ?").get(id));
+      logAudit("QUICK_ADD", "Product", id, { name, sellPrice, barcode }, req.user?.username || 'system');
+
+      res.status(201).json(created);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/barcode/master: Search offline master catalog
+  app.get("/api/barcode/master", requireAuth, (req: any, res) => {
+    try {
+      const q = String(req.query.q || '').trim();
+      let rows: any[] = [];
+      if (q) {
+        rows = db.prepare(`
+          SELECT * FROM barcode_master 
+          WHERE name LIKE ? OR barcode LIKE ? OR brand LIKE ? 
+          ORDER BY name ASC LIMIT 30
+        `).all(`%${q}%`, `%${q}%`, `%${q}%`);
+      } else {
+        rows = db.prepare("SELECT * FROM barcode_master ORDER BY name ASC LIMIT 30").all();
+      }
+      res.json(rows);
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
