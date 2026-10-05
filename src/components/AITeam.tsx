@@ -25,6 +25,13 @@ const AGENT_DESCRIPTIONS: Record<AgentId, string> = {
   'qa-engineer': 'Test cases, edge cases, bug reports, quality review',
   'release-manager': 'Changelogs, deployment checklists, versioning',
   'tech-lead': 'Architecture decisions, team orchestration, final calls',
+  'security-engineer': 'Threat modeling, application security, privacy, access control',
+  'ui-ux-designer': 'Cashier workflows, accessibility, interface and design systems',
+  'business-analyst': 'Retail operations, accounting flows, GST and finance requirements',
+  'technical-writer': 'API references, merchant guides, developer documentation',
+  'growth-marketing-lead': 'Merchant onboarding, positioning, pilot growth and feedback',
+  'devops-sre-engineer': 'Build and release pipelines, backups, monitoring and recovery',
+  'legal-counsel': 'Indian GST requirements, invoice rules and compliance questions',
 };
 
 const AGENT_BG: Record<AgentId, string> = {
@@ -33,6 +40,13 @@ const AGENT_BG: Record<AgentId, string> = {
   'qa-engineer': 'rgba(16,185,129,0.08)',
   'release-manager': 'rgba(245,158,11,0.08)',
   'tech-lead': 'rgba(239,68,68,0.08)',
+  'security-engineer': 'rgba(236,72,153,0.08)',
+  'ui-ux-designer': 'rgba(6,182,212,0.08)',
+  'business-analyst': 'rgba(132,204,22,0.08)',
+  'technical-writer': 'rgba(148,163,184,0.08)',
+  'growth-marketing-lead': 'rgba(249,115,22,0.08)',
+  'devops-sre-engineer': 'rgba(20,184,166,0.08)',
+  'legal-counsel': 'rgba(168,85,247,0.08)',
 };
 
 const AGENT_BORDER: Record<AgentId, string> = {
@@ -41,6 +55,13 @@ const AGENT_BORDER: Record<AgentId, string> = {
   'qa-engineer': 'rgba(16,185,129,0.25)',
   'release-manager': 'rgba(245,158,11,0.25)',
   'tech-lead': 'rgba(239,68,68,0.25)',
+  'security-engineer': 'rgba(236,72,153,0.25)',
+  'ui-ux-designer': 'rgba(6,182,212,0.25)',
+  'business-analyst': 'rgba(132,204,22,0.25)',
+  'technical-writer': 'rgba(148,163,184,0.25)',
+  'growth-marketing-lead': 'rgba(249,115,22,0.25)',
+  'devops-sre-engineer': 'rgba(20,184,166,0.25)',
+  'legal-counsel': 'rgba(168,85,247,0.25)',
 };
 
 const DEFAULT_AGENT_ID: AgentId = 'developer';
@@ -654,6 +675,41 @@ function getQuickPrompts(agentId: AgentId): string[] {
       'Should we use SQLite or PostgreSQL for persistence?',
       'Review overall architecture and suggest improvements',
       'How to scale this ERP to multi-tenant?',
+    ],
+    'security-engineer': [
+      'Threat model the login and API authorization flows',
+      'Review invoice and inventory endpoints for data integrity risks',
+      'Create a practical security hardening checklist for this app',
+    ],
+    'ui-ux-designer': [
+      'Review the Quick Bill flow for cashier friction',
+      'Suggest accessibility improvements for the current interface',
+      'Design a clear empty state for the inventory module',
+    ],
+    'business-analyst': [
+      'Map the purchase-to-vendor-ledger accounting flow',
+      'Define acceptance criteria for customer credit limits',
+      'Review the GST and invoice calculations for missing requirements',
+    ],
+    'technical-writer': [
+      'Draft API documentation for the invoice endpoints',
+      'Write a cashier quick-start guide for a new feature',
+      'Identify documentation that is out of sync with the code',
+    ],
+    'growth-marketing-lead': [
+      'Design a low-cost pilot onboarding plan for local retailers',
+      'Draft positioning for an offline-first retail ERP',
+      'Turn merchant feedback into a prioritized experiment',
+    ],
+    'devops-sre-engineer': [
+      'Create a deployment and rollback checklist for this app',
+      'Review the SQLite backup and recovery approach',
+      'Propose useful health checks and operational alerts',
+    ],
+    'legal-counsel': [
+      'List invoice fields to verify against current Indian GST rules',
+      'Review the app’s statutory record-retention assumptions',
+      'Identify compliance questions that need a qualified CA or lawyer',
     ],
   };
   return prompts[agentId] || [];

@@ -23,6 +23,13 @@ const FLOAT_AGENTS: AgentMeta[] = [
   { id: 'qa-engineer',     shortName: 'Quinn', emoji: '🔍', color: '#10B981' },
   { id: 'release-manager', shortName: 'Rex',   emoji: '🚀', color: '#F59E0B' },
   { id: 'tech-lead',       shortName: 'Zara',  emoji: '🎯', color: '#EF4444' },
+  { id: 'security-engineer', shortName: 'Maya', emoji: '🛡️', color: '#EC4899' },
+  { id: 'ui-ux-designer', shortName: 'Leo', emoji: '🎨', color: '#06B6D4' },
+  { id: 'business-analyst', shortName: 'Rohan', emoji: '📊', color: '#84CC16' },
+  { id: 'technical-writer', shortName: 'Kabir', emoji: '📝', color: '#94A3B8' },
+  { id: 'growth-marketing-lead', shortName: 'Arjun', emoji: '📣', color: '#F97316' },
+  { id: 'devops-sre-engineer', shortName: 'Vikram', emoji: '⚙️', color: '#14B8A6' },
+  { id: 'legal-counsel', shortName: 'Meera', emoji: '⚖️', color: '#A855F7' },
 ];
 
 const AGENT_BG: Record<AgentId, string> = {
@@ -31,6 +38,13 @@ const AGENT_BG: Record<AgentId, string> = {
   'qa-engineer':     'rgba(16,185,129,0.12)',
   'release-manager': 'rgba(245,158,11,0.12)',
   'tech-lead':       'rgba(239,68,68,0.12)',
+  'security-engineer': 'rgba(236,72,153,0.12)',
+  'ui-ux-designer': 'rgba(6,182,212,0.12)',
+  'business-analyst': 'rgba(132,204,22,0.12)',
+  'technical-writer': 'rgba(148,163,184,0.12)',
+  'growth-marketing-lead': 'rgba(249,115,22,0.12)',
+  'devops-sre-engineer': 'rgba(20,184,166,0.12)',
+  'legal-counsel': 'rgba(168,85,247,0.12)',
 };
 
 // ─── Inline text renderer (same lightweight logic as AITeam.tsx) ─────────────

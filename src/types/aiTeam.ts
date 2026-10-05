@@ -3,7 +3,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type AgentId = 'product-manager' | 'developer' | 'qa-engineer' | 'release-manager' | 'tech-lead';
+export type AgentId =
+  | 'product-manager'
+  | 'developer'
+  | 'qa-engineer'
+  | 'release-manager'
+  | 'tech-lead'
+  | 'security-engineer'
+  | 'ui-ux-designer'
+  | 'business-analyst'
+  | 'technical-writer'
+  | 'growth-marketing-lead'
+  | 'devops-sre-engineer'
+  | 'legal-counsel';
 
 export interface Agent {
   id: AgentId;
