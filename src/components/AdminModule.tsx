@@ -12,7 +12,6 @@ import {
   Check,
   Plus,
   BookOpen,
-  DollarSign,
   AlertCircle,
   Clock,
   MessageCircle,

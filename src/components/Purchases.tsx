@@ -7,7 +7,7 @@ import {
   ChevronRight, 
   Truck, 
   Store,
-  DollarSign,
+  IndianRupee,
   Calendar,
   Package,
   History,
@@ -258,9 +258,9 @@ export default function Purchases() {
                 <button 
                   disabled={!selectedVendor || cart.length === 0}
                   onClick={handleSettle}
-                  className="w-full py-5 bg-orange-600 disabled:opacity-30 disabled:hover:scale-100 text-white rounded-2xl font-black text-sm shadow-xl shadow-orange-900/40 hover:bg-orange-700 transition-all flex items-center justify-center gap-3 active:scale-95"
+                  className="w-full py-5 bg-orange-600 disabled:opacity-30 disabled:hover:scale-100 text-white rounded-2xl font-black text-sm shadow-xl shadow-orange-900/40 hover:bg-orange-700 transition-all flex items-center justify-center gap-3 active:scale-95 cursor-pointer"
                 >
-                  <DollarSign size={18} /> RECORD PURCHASE & SETTLE
+                  <IndianRupee size={18} /> RECORD PURCHASE & SETTLE
                 </button>
               </div>
             </div>

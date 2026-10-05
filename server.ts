@@ -139,16 +139,53 @@ db.exec(`
 
   CREATE INDEX IF NOT EXISTS idx_ledger_party_date ON ledger_entries(party_id, date);
   CREATE INDEX IF NOT EXISTS idx_ledger_ref ON ledger_entries(reference_id);
+
+  CREATE TABLE IF NOT EXISTS cash_shifts (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    opening_float REAL NOT NULL DEFAULT 0,
+    cash_sales REAL NOT NULL DEFAULT 0,
+    cash_in REAL NOT NULL DEFAULT 0,
+    cash_out REAL NOT NULL DEFAULT 0,
+    expected_cash REAL NOT NULL DEFAULT 0,
+    actual_cash REAL,
+    discrepancy REAL,
+    status TEXT NOT NULL CHECK (status IN ('OPEN', 'CLOSED')) DEFAULT 'OPEN',
+    notes TEXT,
+    created_at TEXT NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS cash_drawer_transactions (
+    id TEXT PRIMARY KEY,
+    shift_id TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('CASH_IN', 'CASH_OUT')),
+    amount REAL NOT NULL CHECK (amount > 0),
+    reason TEXT NOT NULL,
+    performed_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (shift_id) REFERENCES cash_shifts(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_shifts_user_status ON cash_shifts (user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_drawer_shift ON cash_drawer_transactions (shift_id);
 `);
 
-// Current Financial Year helper (April 1 to March 31) e.g., "2026-27"
+// Safe migrations for existing databases
+try { db.exec("ALTER TABLE invoices ADD COLUMN split_payments_json TEXT;"); } catch (_) {}
+try { db.exec("ALTER TABLE invoices ADD COLUMN shift_id TEXT;"); } catch (_) {}
+
+// Rule 46 CGST Compliant Financial Year helper (April 1 to March 31) e.g., "26-27" (Strict 14/15-char standard)
 function getCurrentFinancialYear(): string {
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth(); // 0-indexed: 0 = Jan, 3 = Apr
   const startYear = month >= 3 ? year : year - 1;
+  const startYearShort = String(startYear % 100).padStart(2, '0');
   const endYearShort = String((startYear + 1) % 100).padStart(2, '0');
-  return `${startYear}-${endYearShort}`;
+  return `${startYearShort}-${endYearShort}`;
 }
 
 // Seed Default Users (admin, cashier, accountant)
@@ -398,9 +435,32 @@ async function startServer() {
 
   // --- API Routes ---
   
-  // Health check
+  // Health check with operational SRE telemetry & WAL stats
   app.get("/api/health", (_req, res) => {
-    res.json({ status: "ok", message: "Unidex ERP Server is active with SQLite ACID Engine & Hardened RBAC" });
+    let walTelemetry: any = null;
+    let integrity = "unknown";
+    try {
+      walTelemetry = db.prepare("PRAGMA wal_checkpoint(PASSIVE);").get();
+      const integrityRow = db.prepare("PRAGMA quick_check;").get() as any;
+      integrity = integrityRow?.quick_check || "ok";
+    } catch (_) {}
+
+    res.json({
+      status: "ok",
+      version: "1.4.0",
+      message: "Unidex ERP Server is active with SQLite ACID Engine & Hardened RBAC",
+      uptime_seconds: Math.floor(process.uptime()),
+      database: {
+        engine: "node:sqlite",
+        journal_mode: "WAL",
+        integrity,
+        wal_checkpoint: walTelemetry
+      },
+      system: {
+        memory_rss_mb: Math.round(process.memoryUsage().rss / (1024 * 1024) * 10) / 10,
+        node_version: process.version
+      }
+    });
   });
 
   // Multi-User Authentication Routes with Cryptographic Token Generation & Password Validation
@@ -1030,20 +1090,31 @@ async function startServer() {
     }
   });
 
-  // ACID Transaction Checkout: Invoices
+  // ACID Transaction Checkout: Invoices with Multi-Tender & Cash Shift Routing
   app.post("/api/invoices", requireAuth, (req: any, res) => {
-    const { items, total, customer, customerId, subtotal, tax, gstType, paymentMethod } = req.body;
+    const { items, total, customer, customerId, subtotal, tax, gstType, paymentMethod, splitPayments, shiftId } = req.body;
     const currentFy = getCurrentFinancialYear();
 
     db.exec("BEGIN TRANSACTION;");
     try {
-      // 1. Manage Sequence Number
+      // 1. Manage Sequence Number (Rule 46 Strict 14/15-char: e.g. INV/26-27/00001)
       let seqRow = db.prepare("SELECT next_number FROM invoice_sequence WHERE fy = ?").get(currentFy) as { next_number: number } | undefined;
       let nextNum = 1;
+
+      // Detect highest existing invoice sequence number for this financial year
+      const maxInv = db.prepare("SELECT id FROM invoices WHERE id LIKE ? ORDER BY id DESC LIMIT 1").get(`INV/${currentFy}/%`) as { id: string } | undefined;
+      let highestExisting = 0;
+      if (maxInv) {
+        const parts = maxInv.id.split('/');
+        const parsed = parseInt(parts[parts.length - 1], 10);
+        if (!isNaN(parsed)) highestExisting = parsed;
+      }
+
       if (!seqRow) {
-        db.prepare("INSERT INTO invoice_sequence (fy, next_number) VALUES (?, 2)").run(currentFy);
+        nextNum = Math.max(1, highestExisting + 1);
+        db.prepare("INSERT INTO invoice_sequence (fy, next_number) VALUES (?, ?)").run(currentFy, nextNum + 1);
       } else {
-        nextNum = seqRow.next_number;
+        nextNum = Math.max(seqRow.next_number, highestExisting + 1);
         db.prepare("UPDATE invoice_sequence SET next_number = ? WHERE fy = ?").run(nextNum + 1, currentFy);
       }
 
@@ -1057,6 +1128,33 @@ async function startServer() {
       const roundedTotal = Math.round(unroundedTotal);
       const roundOff = +(roundedTotal - unroundedTotal).toFixed(2);
 
+      // Multi-Tender Breakdown Calculation
+      let cashPart = 0;
+      let upiPart = 0;
+      let cardPart = 0;
+      let creditPart = 0;
+
+      if (Array.isArray(splitPayments) && splitPayments.length > 0) {
+        for (const sp of splitPayments) {
+          const amt = Number(sp.amount || 0);
+          if (amt > 0) {
+            if (sp.mode === 'cash') cashPart += amt;
+            else if (sp.mode === 'upi') upiPart += amt;
+            else if (sp.mode === 'card') cardPart += amt;
+            else if (sp.mode === 'credit') creditPart += amt;
+          }
+        }
+        const totalSplit = cashPart + upiPart + cardPart + creditPart;
+        if (Math.abs(totalSplit - roundedTotal) > 0.05) {
+          throw new Error(`Split tender total (₹${totalSplit.toFixed(2)}) does not match bill total (₹${roundedTotal.toFixed(2)}).`);
+        }
+      } else {
+        if (paymentMethod === 'cash') cashPart = roundedTotal;
+        else if (paymentMethod === 'credit' || paymentMethod === 'unpaid') creditPart = roundedTotal;
+        else if (paymentMethod === 'upi') upiPart = roundedTotal;
+        else if (paymentMethod === 'card') cardPart = roundedTotal;
+      }
+
       // 2. Decrement Stock for each item
       if (Array.isArray(items)) {
         const updateStockStmt = db.prepare("UPDATE products SET stock = MAX(0, stock - ?) WHERE id = ?");
@@ -1066,43 +1164,61 @@ async function startServer() {
         }
       }
 
-      // 3. Customer Ledger Balance sync & Ledger Entry
-      if (paymentMethod === 'credit' || paymentMethod === 'unpaid') {
+      // 3. Customer Ledger Balance sync & Ledger Entry (if credit portion > 0)
+      if (creditPart > 0) {
         let matchedParty: any = null;
         if (customerId) {
           matchedParty = db.prepare("SELECT * FROM parties WHERE id = ?").get(customerId);
-        } else if (customer) {
+        } else if (customer && customer !== 'Walk-in Customer') {
           matchedParty = db.prepare("SELECT * FROM parties WHERE LOWER(name) = LOWER(?)").get(customer);
         }
 
-        if (matchedParty) {
-          const newBal = (Number(matchedParty.balance) || 0) + roundedTotal;
-          db.prepare("UPDATE parties SET balance = ?, updated_at = ? WHERE id = ?").run(newBal, new Date().toISOString(), matchedParty.id);
-
-          // Insert Ledger Entry (Debit increases receivable from customer)
-          db.prepare(`
-            INSERT INTO ledger_entries (
-              id, party_id, date, type, reference_id, description, debit, credit, balance, payment_mode, notes, created_by, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          `).run(
-            `LED-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-            matchedParty.id,
-            new Date().toISOString(),
-            'sale',
-            invoiceId,
-            `Credit Sale Invoice ${invoiceId}`,
-            roundedTotal,
-            0,
-            newBal,
-            'credit',
-            `Credit Sale for ₹${roundedTotal}`,
-            req.user?.username || 'system',
-            new Date().toISOString()
-          );
+        if (!matchedParty) {
+          throw new Error("Credit / Udhar tender requires selecting a registered customer.");
         }
+
+        const newBal = (Number(matchedParty.balance) || 0) + creditPart;
+        db.prepare("UPDATE parties SET balance = ?, updated_at = ? WHERE id = ?").run(newBal, new Date().toISOString(), matchedParty.id);
+
+        // Insert Ledger Entry (Debit increases receivable from customer)
+        db.prepare(`
+          INSERT INTO ledger_entries (
+            id, party_id, date, type, reference_id, description, debit, credit, balance, payment_mode, notes, created_by, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          `LED-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          matchedParty.id,
+          new Date().toISOString(),
+          'sale',
+          invoiceId,
+          `Credit Sale on Invoice ${invoiceId}`,
+          creditPart,
+          0,
+          newBal,
+          'credit',
+          `Credit tender ₹${creditPart} of invoice total ₹${roundedTotal}`,
+          req.user?.username || 'system',
+          new Date().toISOString()
+        );
       }
 
-      // 4. Insert Invoice Record
+      // 4. Update Cash Shift (if cash portion > 0)
+      let activeShiftId = shiftId;
+      if (!activeShiftId && req.user?.id) {
+        const openShift = db.prepare("SELECT id FROM cash_shifts WHERE (user_id = ? OR 1=1) AND status = 'OPEN' ORDER BY opened_at DESC LIMIT 1").get(req.user.id) as any;
+        if (openShift) activeShiftId = openShift.id;
+      }
+      if (activeShiftId && cashPart > 0) {
+        db.prepare(`
+          UPDATE cash_shifts 
+          SET cash_sales = cash_sales + ?,
+              expected_cash = opening_float + (cash_sales + ?) + cash_in - cash_out
+          WHERE id = ? AND status = 'OPEN'
+        `).run(cashPart, cashPart, activeShiftId);
+      }
+
+      // 5. Insert Invoice Record
+      const finalPaymentMethod = (Array.isArray(splitPayments) && splitPayments.length > 0) ? 'split' : (paymentMethod || 'cash');
       const invoice = {
         id: invoiceId,
         date: new Date().toISOString(),
@@ -1114,13 +1230,15 @@ async function startServer() {
         customer: customer || 'Walk-in Customer',
         customerId: customerId || null,
         gstType: gstType || 'GST',
-        paymentMethod: paymentMethod || 'cash'
+        paymentMethod: finalPaymentMethod,
+        splitPayments: Array.isArray(splitPayments) && splitPayments.length > 0 ? splitPayments : null,
+        shiftId: activeShiftId || null
       };
 
       db.prepare(`
         INSERT INTO invoices (
-          id, date, customer, customer_id, subtotal, tax, round_off, total, gst_type, payment_method, items_json, created_by
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          id, date, customer, customer_id, subtotal, tax, round_off, total, gst_type, payment_method, items_json, created_by, split_payments_json, shift_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         invoice.id,
         invoice.date,
@@ -1133,13 +1251,25 @@ async function startServer() {
         invoice.gstType,
         invoice.paymentMethod,
         JSON.stringify(invoice.items || []),
-        req.user?.username || 'system'
+        req.user?.username || 'system',
+        invoice.splitPayments ? JSON.stringify(invoice.splitPayments) : null,
+        invoice.shiftId
       );
 
       // Commit the ACID transaction
       db.exec("COMMIT;");
 
-      logAudit("CREATE", "Invoice", invoice.id, { total: roundedTotal, roundOff, customer: invoice.customer, paymentMethod }, req.user?.username || 'system');
+      logAudit("CREATE", "Invoice", invoice.id, { 
+        total: roundedTotal, 
+        roundOff, 
+        customer: invoice.customer, 
+        paymentMethod: invoice.paymentMethod,
+        cashPart,
+        upiPart,
+        cardPart,
+        creditPart
+      }, req.user?.username || 'system');
+      
       res.status(201).json(invoice);
     } catch (err: any) {
       db.exec("ROLLBACK;");
@@ -1162,9 +1292,299 @@ async function startServer() {
         total: Number(r.total),
         gstType: r.gst_type,
         paymentMethod: r.payment_method,
+        splitPayments: r.split_payments_json ? JSON.parse(r.split_payments_json) : null,
+        shiftId: r.shift_id,
         items: JSON.parse(r.items_json || "[]")
       }));
       res.json(mapped);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // --- Cash Register Shifts & Day-End Z-Report APIs ---
+
+  // GET /api/shifts/current: Get active shift for cashier/store
+  app.get("/api/shifts/current", requireAuth, (req: any, res) => {
+    try {
+      const shift = db.prepare(`
+        SELECT * FROM cash_shifts 
+        WHERE (user_id = ? OR 1=1) AND status = 'OPEN' 
+        ORDER BY opened_at DESC LIMIT 1
+      `).get(req.user?.id) as any;
+
+      if (!shift) {
+        return res.json({ shift: null, transactions: [] });
+      }
+
+      const transactions = db.prepare(`
+        SELECT * FROM cash_drawer_transactions 
+        WHERE shift_id = ? 
+        ORDER BY created_at ASC
+      `).all(shift.id);
+
+      res.json({
+        shift: {
+          id: shift.id,
+          userId: shift.user_id,
+          username: shift.username,
+          openedAt: shift.opened_at,
+          closedAt: shift.closed_at,
+          openingFloat: Number(shift.opening_float),
+          cashSales: Number(shift.cash_sales),
+          cashIn: Number(shift.cash_in),
+          cashOut: Number(shift.cash_out),
+          expectedCash: Number(shift.expected_cash),
+          actualCash: shift.actual_cash !== null ? Number(shift.actual_cash) : null,
+          discrepancy: shift.discrepancy !== null ? Number(shift.discrepancy) : null,
+          status: shift.status,
+          notes: shift.notes
+        },
+        transactions: transactions.map((t: any) => ({
+          id: t.id,
+          shiftId: t.shift_id,
+          type: t.type,
+          amount: Number(t.amount),
+          reason: t.reason,
+          performedBy: t.performed_by,
+          createdAt: t.created_at
+        }))
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/shifts/open: Open a new cash drawer shift
+  app.post("/api/shifts/open", requireAuth, (req: any, res) => {
+    try {
+      const userId = req.user?.id || 'u-cashier';
+      const existingOpen = db.prepare(`
+        SELECT id FROM cash_shifts WHERE user_id = ? AND status = 'OPEN'
+      `).get(userId);
+
+      if (existingOpen) {
+        return res.status(400).json({ error: "A register shift is already currently OPEN for this user." });
+      }
+
+      const openingFloat = Number(req.body.openingFloat || 0);
+      if (isNaN(openingFloat) || openingFloat < 0) {
+        return res.status(400).json({ error: "Opening float must be a non-negative amount." });
+      }
+
+      const shiftId = `SHIFT-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.floor(100 + Math.random() * 900)}`;
+      const now = new Date().toISOString();
+      const username = req.user?.name || req.user?.username || 'Cashier';
+
+      db.prepare(`
+        INSERT INTO cash_shifts (
+          id, user_id, username, opened_at, opening_float, cash_sales, cash_in, cash_out, expected_cash, status, notes, created_at
+        ) VALUES (?, ?, ?, ?, ?, 0, 0, 0, ?, 'OPEN', ?, ?)
+      `).run(shiftId, userId, username, now, openingFloat, openingFloat, req.body.notes || '', now);
+
+      logAudit("SHIFT_OPEN", "CashShift", shiftId, { openingFloat, username }, username);
+
+      res.status(201).json({
+        id: shiftId,
+        userId,
+        username,
+        openedAt: now,
+        openingFloat,
+        cashSales: 0,
+        cashIn: 0,
+        cashOut: 0,
+        expectedCash: openingFloat,
+        status: 'OPEN'
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/shifts/petty-cash: Add or withdraw cash from drawer (Cash In / Cash Out)
+  app.post("/api/shifts/petty-cash", requireAuth, (req: any, res) => {
+    const { shiftId, type, amount, reason } = req.body;
+    const numAmount = Number(amount);
+
+    if (!shiftId || !type || !['CASH_IN', 'CASH_OUT'].includes(type) || isNaN(numAmount) || numAmount <= 0) {
+      return res.status(400).json({ error: "Valid shiftId, type (CASH_IN / CASH_OUT), positive amount, and reason required." });
+    }
+
+    db.exec("BEGIN TRANSACTION;");
+    try {
+      const shift = db.prepare("SELECT * FROM cash_shifts WHERE id = ? AND status = 'OPEN'").get(shiftId) as any;
+      if (!shift) {
+        db.exec("ROLLBACK;");
+        return res.status(404).json({ error: "Active open shift not found." });
+      }
+
+      const txId = `CDT-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+      const now = new Date().toISOString();
+      const performedBy = req.user?.name || req.user?.username || 'Staff';
+
+      db.prepare(`
+        INSERT INTO cash_drawer_transactions (id, shift_id, type, amount, reason, performed_by, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(txId, shiftId, type, numAmount, reason || (type === 'CASH_IN' ? 'Float Topup' : 'Petty Expense'), performedBy, now);
+
+      if (type === 'CASH_IN') {
+        db.prepare(`
+          UPDATE cash_shifts 
+          SET cash_in = cash_in + ?,
+              expected_cash = opening_float + cash_sales + (cash_in + ?) - cash_out
+          WHERE id = ?
+        `).run(numAmount, numAmount, shiftId);
+      } else {
+        db.prepare(`
+          UPDATE cash_shifts 
+          SET cash_out = cash_out + ?,
+              expected_cash = opening_float + cash_sales + cash_in - (cash_out + ?)
+          WHERE id = ?
+        `).run(numAmount, numAmount, shiftId);
+      }
+
+      db.exec("COMMIT;");
+
+      const updated = db.prepare("SELECT * FROM cash_shifts WHERE id = ?").get(shiftId) as any;
+      logAudit("PETTY_CASH", "CashShift", shiftId, { type, amount: numAmount, reason }, performedBy);
+
+      res.status(201).json({
+        transaction: { id: txId, shiftId, type, amount: numAmount, reason, performedBy, createdAt: now },
+        shift: {
+          id: updated.id,
+          expectedCash: Number(updated.expected_cash),
+          cashIn: Number(updated.cash_in),
+          cashOut: Number(updated.cash_out)
+        }
+      });
+    } catch (err: any) {
+      db.exec("ROLLBACK;");
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // POST /api/shifts/close: Reconcile cash drawer and generate Day-End Z-Report
+  app.post("/api/shifts/close", requireAuth, (req: any, res) => {
+    const { shiftId, actualCash, notes, denominations } = req.body;
+    const numActual = Number(actualCash);
+
+    if (!shiftId || isNaN(numActual) || numActual < 0) {
+      return res.status(400).json({ error: "Valid shiftId and non-negative counted physical cash amount required." });
+    }
+
+    db.exec("BEGIN TRANSACTION;");
+    try {
+      const shift = db.prepare("SELECT * FROM cash_shifts WHERE id = ? AND status = 'OPEN'").get(shiftId) as any;
+      if (!shift) {
+        db.exec("ROLLBACK;");
+        return res.status(404).json({ error: "Active open shift not found." });
+      }
+
+      const expectedCash = Number(shift.opening_float) + Number(shift.cash_sales) + Number(shift.cash_in) - Number(shift.cash_out);
+      const discrepancy = +(numActual - expectedCash).toFixed(2);
+      const now = new Date().toISOString();
+
+      db.prepare(`
+        UPDATE cash_shifts SET
+          closed_at = ?,
+          actual_cash = ?,
+          discrepancy = ?,
+          status = 'CLOSED',
+          notes = ?
+        WHERE id = ?
+      `).run(now, numActual, discrepancy, notes || '', shiftId);
+
+      // Aggregate all non-cash sales (UPI, Card, Credit) and invoice stats during shift
+      const invoices = db.prepare(`
+        SELECT * FROM invoices 
+        WHERE shift_id = ? OR (date >= ? AND date <= ?)
+      `).all(shiftId, shift.opened_at, now) as any[];
+
+      let upiSales = 0;
+      let cardSales = 0;
+      let creditSales = 0;
+      let totalShiftSales = 0;
+
+      for (const inv of invoices) {
+        totalShiftSales += Number(inv.total || 0);
+        if (inv.split_payments_json) {
+          try {
+            const splits = JSON.parse(inv.split_payments_json);
+            for (const sp of splits) {
+              const amt = Number(sp.amount || 0);
+              if (sp.mode === 'upi') upiSales += amt;
+              else if (sp.mode === 'card') cardSales += amt;
+              else if (sp.mode === 'credit') creditSales += amt;
+            }
+          } catch (_) {}
+        } else {
+          if (inv.payment_method === 'upi') upiSales += Number(inv.total || 0);
+          else if (inv.payment_method === 'card') cardSales += Number(inv.total || 0);
+          else if (inv.payment_method === 'credit') creditSales += Number(inv.total || 0);
+        }
+      }
+
+      db.exec("COMMIT;");
+
+      const zReport = {
+        zReportNumber: `Z-${shiftId.replace('SHIFT-', '')}`,
+        generatedAt: now,
+        shiftId,
+        cashier: shift.username,
+        openedAt: shift.opened_at,
+        closedAt: now,
+        openingFloat: Number(shift.opening_float),
+        cashSales: Number(shift.cash_sales),
+        cashIn: Number(shift.cash_in),
+        cashOut: Number(shift.cash_out),
+        expectedCash,
+        actualCash: numActual,
+        discrepancy,
+        status: discrepancy === 0 ? 'BALANCED' : discrepancy > 0 ? 'OVERAGE' : 'SHORTAGE',
+        nonCashSales: {
+          upi: +upiSales.toFixed(2),
+          card: +cardSales.toFixed(2),
+          credit: +creditSales.toFixed(2),
+          totalNonCash: +(upiSales + cardSales + creditSales).toFixed(2)
+        },
+        grossSales: +totalShiftSales.toFixed(2),
+        invoiceCount: invoices.length,
+        notes: notes || '',
+        denominations: denominations || null
+      };
+
+      logAudit("SHIFT_CLOSE", "CashShift", shiftId, { discrepancy, expectedCash, actualCash: numActual }, req.user?.username || 'system');
+
+      res.json({
+        success: true,
+        zReport
+      });
+    } catch (err: any) {
+      db.exec("ROLLBACK;");
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // GET /api/shifts/history: List all closed and open shifts
+  app.get("/api/shifts/history", requireAuth, (_req, res) => {
+    try {
+      const rows = db.prepare("SELECT * FROM cash_shifts ORDER BY opened_at DESC LIMIT 50").all() as any[];
+      res.json(rows.map(s => ({
+        id: s.id,
+        userId: s.user_id,
+        username: s.username,
+        openedAt: s.opened_at,
+        closedAt: s.closed_at,
+        openingFloat: Number(s.opening_float),
+        cashSales: Number(s.cash_sales),
+        cashIn: Number(s.cash_in),
+        cashOut: Number(s.cash_out),
+        expectedCash: Number(s.expected_cash),
+        actualCash: s.actual_cash !== null ? Number(s.actual_cash) : null,
+        discrepancy: s.discrepancy !== null ? Number(s.discrepancy) : null,
+        status: s.status,
+        notes: s.notes
+      })));
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -1454,21 +1874,48 @@ Keep each perspective concise but insightful.`;
 
   // --- Admin Maintenance & Pilot Setup ---
 
-  // GET /api/admin/backup-db: Stream sqlite db file for 1-click merchant backup
+  // GET /api/admin/backup-db: Stream ACID-consistent sqlite db backup using VACUUM INTO
   app.get("/api/admin/backup-db", requireNonCashier, (_req: any, res) => {
+    const tempBackupFile = path.join(DATA_DIR, `unidex_temp_backup_${Date.now()}.db`);
     try {
       if (!fs.existsSync(SQLITE_DB_FILE)) {
         return res.status(404).json({ error: "Database file not found." });
       }
+
+      // Execute WAL checkpoint and VACUUM INTO to create an atomic, defragmented snapshot
+      const sanitizedTempPath = tempBackupFile.replace(/\\/g, "/");
+      db.exec(`VACUUM INTO '${sanitizedTempPath}';`);
+
       const dateStr = new Date().toISOString().split("T")[0];
       const filename = `unidex_backup_${dateStr}.db`;
       res.setHeader("Content-Type", "application/octet-stream");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-      const fileStream = fs.createReadStream(SQLITE_DB_FILE);
+
+      const fileStream = fs.createReadStream(tempBackupFile);
       fileStream.pipe(res);
+      fileStream.on("close", () => {
+        try {
+          if (fs.existsSync(tempBackupFile)) {
+            fs.unlinkSync(tempBackupFile);
+          }
+        } catch (_) {}
+      });
+      fileStream.on("error", (err) => {
+        console.error("Stream error during backup download:", err);
+        try {
+          if (fs.existsSync(tempBackupFile)) {
+            fs.unlinkSync(tempBackupFile);
+          }
+        } catch (_) {}
+      });
     } catch (err: any) {
-      console.error("Backup failed:", err);
-      res.status(500).json({ error: "Failed to download database backup: " + err.message });
+      console.error("Atomic backup failed:", err);
+      try {
+        if (fs.existsSync(tempBackupFile)) {
+          fs.unlinkSync(tempBackupFile);
+        }
+      } catch (_) {}
+      res.status(500).json({ error: "Failed to create atomic database backup: " + err.message });
     }
   });
 
@@ -1482,6 +1929,8 @@ Keep each perspective concise but insightful.`;
       db.exec("DELETE FROM invoices;");
       db.exec("DELETE FROM purchases;");
       db.exec("DELETE FROM ledger_entries;");
+      db.exec("DELETE FROM cash_shifts;");
+      db.exec("DELETE FROM cash_drawer_transactions;");
       
       // Reset party balances to 0
       db.exec("UPDATE parties SET balance = 0, updated_at = datetime('now');");

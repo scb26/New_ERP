@@ -22,6 +22,7 @@ export interface ReceiptData {
   roundOff?: number;
   totalAmount: number;
   paymentMethod?: string;
+  splitPayments?: Array<{ mode: string; amount: number; reference?: string }>;
   gstType?: string;
   business?: {
     name?: string;
@@ -73,7 +74,9 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({ receip
       `*Total GST:* ₹${receipt.totalTax.toFixed(2)}\n` +
       roundOffLine +
       `*Grand Total:* ₹${receipt.totalAmount.toFixed(2)}\n` +
-      `*Payment:* ${(receipt.paymentMethod || 'Paid').toUpperCase()}\n` +
+      (receipt.splitPayments && receipt.splitPayments.length > 0
+        ? `*Payment Breakdown:*\n` + receipt.splitPayments.map(sp => `• ${sp.mode.toUpperCase()}${sp.reference ? ` (${sp.reference})` : ''}: ₹${Number(sp.amount).toFixed(2)}`).join('\n') + `\n`
+        : `*Payment:* ${(receipt.paymentMethod || 'Paid').toUpperCase()}\n`) +
       `────────────────────────\n` +
       `_Thank you for your business!_`;
   };
@@ -216,10 +219,22 @@ export const ThermalReceiptModal: React.FC<ThermalReceiptModalProps> = ({ receip
                 <span>GRAND TOTAL:</span>
                 <span>₹{receipt.totalAmount.toFixed(2)}</span>
               </div>
-              <div className="flex justify-between text-[9px] text-gray-600 pt-0.5">
-                <span>Payment Mode:</span>
-                <span className="uppercase font-bold">{receipt.paymentMethod || 'CASH / UPI'}</span>
-              </div>
+              {receipt.splitPayments && receipt.splitPayments.length > 0 ? (
+                <div className="pt-1.5 space-y-0.5 border-t border-dashed border-gray-400 text-[9px]">
+                  <div className="font-bold text-gray-800">Tender Breakdown:</div>
+                  {receipt.splitPayments.map((sp: any, i: number) => (
+                    <div key={i} className="flex justify-between text-gray-700 pl-1.5">
+                      <span className="uppercase">• {sp.mode}{sp.reference ? ` (${sp.reference})` : ''}:</span>
+                      <span className="font-mono font-bold">₹{Number(sp.amount).toFixed(2)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex justify-between text-[9px] text-gray-600 pt-0.5">
+                  <span>Payment Mode:</span>
+                  <span className="uppercase font-bold">{receipt.paymentMethod || 'CASH / UPI'}</span>
+                </div>
+              )}
             </div>
 
             {/* Footer */}

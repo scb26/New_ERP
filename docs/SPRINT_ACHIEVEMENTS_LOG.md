@@ -154,4 +154,39 @@ This living ledger documents the formal achievements, sprint goals, completed de
 
 ---
 
+### 🚀 Sprint 4.0 — Counter Hardening, Rule 46 Compliance, Multi-Tender & Cash Shifts
+* **Sprint Version:** `v1.5.0`
+* **Kickoff Date:** October 5, 2026
+* **Completion Date:** October 5, 2026
+* **Sprint Goal:** Harden counter pilot operations: enforce strict 14/15-char Rule 46 GST invoice numbering (`INV/YY-YY/00001`), implement multi-tender split payment billing (Cash + UPI + Card + Credit), cash drawer shift reconciliation with printable ESC/POS 80mm Z-Reports, and zero-cost local OmniSearch command palette (`Ctrl+K`).
+* **PRD Reference:** [`docs/PRD_Sprint_4_Counter_Hardening_MultiTender_CashDrawer.md`](PRD_Sprint_4_Counter_Hardening_MultiTender_CashDrawer.md)
+
+#### 🎯 Key Achievements & Completed Deliverables:
+1. **⚖️ Statutory Rule 46 Strict 15-Char Invoice Numbering (`INV/26-27/XXXXX`):**
+   - Eliminated statutory 17-char violation; enforced 2-digit FY format (`26-27`) yielding exact 14/15-character sequence IDs.
+   - Designed self-healing, monotonic sequence allocation in `server.ts` checking maximum existing IDs to prevent duplicates.
+   - 100% compliant with CGST Rule 46(b) 16-character statutory ceiling.
+2. **💳 Multi-Tender & Split Payment Billing in QuickBill:**
+   - Single-click fast tender modes: [100% Cash], [100% UPI QR], [Card Swipe], [Customer Credit].
+   - Multi-Tender split billing modal supporting simultaneous payment across all 4 modes.
+   - Dynamic real-time Local QR generation updating UPI intent to the exact split amount.
+   - Transactional backend routing: cash to shift drawer, credit to customer Khata, items to stock.
+   - Detailed tender breakdown displayed on 80mm/58mm thermal receipts and WhatsApp messages.
+3. **💼 Cash Register Shift Management & Day-End Z-Report:**
+   - Dedicated `cash_shifts` and `cash_drawer_transactions` SQLite tables with WAL mode durability.
+   - Shift opening float declaration, Petty Cash In (safe additions) and Petty Cash Out (tea, courier, vendor payouts).
+   - End-of-shift reconciliation with currency denomination counter (₹2000, ₹500, ₹200, ₹100, ₹50, ₹20, ₹10, coins).
+   - Unalterable printable Day-End **Z-Report** thermal slip itemizing gross sales, tender split, counted cash, and variance.
+4. **⚡ Zero-Cost Local OmniSearch Command Palette (`Ctrl+K`):**
+   - Centered keyboard overlay accessible from anywhere via `Ctrl+K` / `Cmd+K` and `Ctrl+D` for drawer.
+   - Instant local search (< 10ms) across Products (with live stock & cashier margin redaction), Customer Khata balances (with 1-click WhatsApp payment reminders), and fast navigation shortcuts (`Alt+1` to `Alt+6`).
+
+#### 🛡️ Quality & Verification Sign-Off:
+- **TypeScript Health:** `tsc --noEmit` passed with 0 errors.
+- **Production Build:** `vite build` completed cleanly in 8.09s.
+- **End-to-End API Test:** 100% PASS on shift opening, petty cash in/out, split tender checkout, Rule 46 length test, and Z-Report closing.
+- **Release Sign-Off:** Issued by Release Manager Rex ([`docs/RELEASE_NOTES_v1.5.0.md`](RELEASE_NOTES_v1.5.0.md)).
+
+---
+
 *This document is updated automatically at the completion of each sprint.*

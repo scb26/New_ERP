@@ -28,11 +28,13 @@ import Purchases from './components/Purchases';
 import MobileView from './components/MobileView';
 import AITeam from './components/AITeam';
 import AITeamFloat from './components/AITeamFloat';
+import OmniSearchModal from './components/OmniSearchModal';
+import CashDrawerModal from './components/CashDrawerModal';
 
 import ThemeToggle from './components/ThemeToggle';
 import { useAuth } from './context/AuthContext';
 import LoginModal from './components/LoginModal';
-import { UserCheck } from 'lucide-react';
+import { UserCheck, Wallet, Command } from 'lucide-react';
 
 type Module = 'dashboard' | 'bill' | 'sales' | 'inventory' | 'purchases' | 'admin' | 'ai-team';
 
@@ -57,8 +59,39 @@ const SidebarItem = ({ icon: Icon, label, description, active, onClick }: { icon
 
 export default function App() {
   const [activeModule, setActiveModule] = useState<Module>('dashboard');
+  const [isOmniSearchOpen, setIsOmniSearchOpen] = useState(false);
+  const [isCashDrawerOpen, setIsCashDrawerOpen] = useState(false);
   const { user, isLoginModalOpen, setIsLoginModalOpen } = useAuth();
   const isCashier = user?.role === 'cashier';
+
+  // Global Keyboard Shortcuts (Ctrl+K: OmniSearch, Ctrl+D: Drawer, Alt+1-6: Modules)
+  React.useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setIsOmniSearchOpen(prev => !prev);
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'd') {
+        e.preventDefault();
+        setIsCashDrawerOpen(prev => !prev);
+      } else if (e.altKey && ['1', '2', '3', '4', '5', '6'].includes(e.key)) {
+        e.preventDefault();
+        const map: Record<string, Module> = {
+          '1': 'dashboard',
+          '2': 'bill',
+          '3': 'sales',
+          '4': 'inventory',
+          '5': 'purchases',
+          '6': 'admin'
+        };
+        const target = map[e.key];
+        if (target && !(isCashier && (target === 'purchases' || target === 'admin'))) {
+          setActiveModule(target);
+        }
+      }
+    };
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [isCashier]);
 
   // If cashier tries to access restricted modules, fallback to dashboard or bill
   const safeActiveModule = (isCashier && (activeModule === 'admin' || activeModule === 'purchases')) ? 'bill' : activeModule;
@@ -90,13 +123,23 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-black dark:text-white font-sans flex flex-col p-4 md:p-6 lg:p-8 pb-32 md:pb-8 selection:bg-blue-600/30 max-w-full overflow-x-hidden transition-colors duration-200">
-      <div className="flex-1 flex gap-8">
+    <div className="h-screen bg-slate-50 text-slate-900 dark:bg-black dark:text-white font-sans flex flex-col p-4 md:p-5 selection:bg-blue-600/30 max-w-full overflow-hidden transition-colors duration-200">
+      <div className="flex-1 flex gap-6 min-h-0 overflow-hidden">
         {/* Sidebar (Desktop Only) */}
-        <aside className="w-72 hidden xl:flex flex-col gap-6 sticky top-8 h-fit self-start">
+        <aside className="w-64 hidden xl:flex flex-col gap-4 h-full shrink-0">
           <div className="flex items-center justify-between px-2">
-            <h2 className="text-3xl font-bold tracking-tight bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-gray-400 bg-clip-text text-transparent">Features</h2>
-            <ThemeToggle />
+            <h2 className="text-2xl font-bold tracking-tight bg-gradient-to-r from-slate-900 to-slate-600 dark:from-white dark:to-gray-400 bg-clip-text text-transparent">Features</h2>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setIsOmniSearchOpen(true)}
+                className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-[#1A1A1A] dark:hover:bg-[#222222] text-slate-500 hover:text-slate-900 dark:text-gray-400 dark:hover:text-white transition-colors cursor-pointer"
+                title="Search anything (Ctrl+K)"
+              >
+                <Search size={16} />
+              </button>
+              <ThemeToggle />
+            </div>
           </div>
 
           {/* User Profile Card & Role Switcher */}
@@ -133,7 +176,7 @@ export default function App() {
             <UserCheck size={16} className="text-slate-400 group-hover:text-blue-500 transition-colors shrink-0" />
           </div>
 
-          <div className="flex flex-col gap-3 pr-2">
+          <div className="flex flex-col gap-2 pr-1 overflow-y-auto custom-scrollbar flex-1">
             <SidebarItem 
               icon={LayoutDashboard} 
               label="Dashboard" 
@@ -180,18 +223,11 @@ export default function App() {
                 onClick={() => setActiveModule('admin')}
               />
             )}
-            <SidebarItem 
-              icon={Bot} 
-              label="AI Team" 
-              description="Dev squad & collaboration" 
-              active={safeActiveModule === 'ai-team'} 
-              onClick={() => setActiveModule('ai-team')}
-            />
           </div>
         </aside>
 
         {/* Main Workspace */}
-        <main className="flex-1 flex flex-col min-h-0">
+        <main className="flex-1 flex flex-col min-h-0 h-full overflow-hidden">
           <AnimatePresence mode="wait" initial={false}>
             <motion.div
               key={activeModule}
@@ -204,7 +240,7 @@ export default function App() {
                 damping: 35,
                 mass: 0.5
               }}
-              className="flex-1 overflow-y-auto custom-scrollbar pr-2"
+              className="flex-1 overflow-y-auto custom-scrollbar pr-2 h-full"
             >
               {renderModule()}
             </motion.div>
@@ -212,8 +248,19 @@ export default function App() {
         </main>
       </div>
 
-      {/* Floating AI Team Assistant Panel */}
-      <AITeamFloat />
+      {/* OmniSearch Global Command Palette (Ctrl+K) */}
+      <OmniSearchModal
+        isOpen={isOmniSearchOpen}
+        onClose={() => setIsOmniSearchOpen(false)}
+        onNavigate={(mod) => setActiveModule(mod)}
+        onOpenCashDrawer={() => setIsCashDrawerOpen(true)}
+      />
+
+      {/* Cash Drawer Shift Modal (Ctrl+D) */}
+      <CashDrawerModal
+        isOpen={isCashDrawerOpen}
+        onClose={() => setIsCashDrawerOpen(false)}
+      />
 
       {/* Operator Switching / Login Modal */}
       <LoginModal 

@@ -11,7 +11,7 @@ import {
   CheckCircle2, 
   Clock, 
   QrCode,
-  DollarSign
+  IndianRupee
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 
