@@ -353,13 +353,15 @@ export default function QuickBill() {
   };
 
   // Per-item GST Tax calculation & Section 170 Round-off
-  const subtotal = cart.reduce((acc, item) => acc + (item.price * item.qty), 0);
+    const totalAmountUnrounded = cart.reduce((acc, item) => acc + (item.price * item.qty), 0);
   const totalTax = cart.reduce((acc, item) => {
-    const rate = item.gstRate !== undefined ? item.gstRate : 18;
-    return acc + (item.price * item.qty * rate) / 100;
+    const rate = item.gstRate !== undefined ? Number(item.gstRate) : 18;
+    const itemTotal = item.price * item.qty;
+    return acc + (itemTotal - (itemTotal / (1 + rate / 100)));
   }, 0);
-  
-  const unroundedTotal = subtotal + totalTax;
+
+  const subtotal = totalAmountUnrounded - totalTax;
+  const unroundedTotal = totalAmountUnrounded;
   const roundedTotal = Math.round(unroundedTotal);
   const roundOff = +(roundedTotal - unroundedTotal).toFixed(2);
   const totalAmount = roundedTotal;
@@ -1325,3 +1327,4 @@ export default function QuickBill() {
     </div>
   );
 }
+

@@ -379,3 +379,5 @@ export const QuickAddProductModal: React.FC<QuickAddProductModalProps> = ({
     </AnimatePresence>
   );
 };
+
+
