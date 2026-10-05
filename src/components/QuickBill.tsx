@@ -20,7 +20,7 @@ import {
   IndianRupee
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Html5QrcodeScanner } from 'html5-qrcode';
+import { BarcodeCameraModal } from './BarcodeCameraModal';
 import ThermalReceiptModal, { ReceiptData } from './ThermalReceiptModal';
 import LocalQRCode from './LocalQRCode';
 import CashDrawerModal from './CashDrawerModal';
@@ -185,13 +185,11 @@ export default function QuickBill() {
         return;
       }
 
-      // Fast hardware barcode scanner buffer detection
-      // Scanners type characters in < 40ms intervals and end with "Enter"
+      // Hardware barcode scanner & keyboard buffer detection
       const now = Date.now();
       const timeDiff = now - lastKeyTimeRef.current;
       lastKeyTimeRef.current = now;
 
-      // Don't intercept when user is typing normally into input elements, unless rapid scanner stream
       const isInputFocused = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA';
 
       if (e.key === 'Enter') {
@@ -203,13 +201,21 @@ export default function QuickBill() {
             setSearchTerm('');
           }
         }
-      } else if (e.key.length === 1) {
-        // If keystrokes are coming in rapidly (< 50ms) or we started buffering
-        if (timeDiff < 50 || barcodeBufferRef.current.length > 0) {
-          barcodeBufferRef.current += e.key;
+      } else if (e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (isInputFocused) {
+          // Inside input: buffer rapid scanner streams (< 85ms)
+          if (timeDiff < 85 || barcodeBufferRef.current.length > 0) {
+            barcodeBufferRef.current += e.key;
+          } else {
+            barcodeBufferRef.current = e.key;
+          }
         } else {
-          // Reset buffer if standard human typing speed
-          barcodeBufferRef.current = e.key;
+          // Outside input: buffer scanner or keypad digits (reset if idle > 1500ms)
+          if (timeDiff < 1500) {
+            barcodeBufferRef.current += e.key;
+          } else {
+            barcodeBufferRef.current = e.key;
+          }
         }
       }
     };
@@ -217,33 +223,6 @@ export default function QuickBill() {
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
   }, [products, showCheckoutModal, paymentMethod, loading, isScanning, searchTerm, quickAddModalOpen]);
-
-  // 2. Camera Barcode Scanner
-  useEffect(() => {
-    let scanner: Html5QrcodeScanner | null = null;
-    if (isScanning) {
-      scanner = new Html5QrcodeScanner(
-        "barcode-reader",
-        { fps: 15, qrbox: { width: 250, height: 250 } },
-        /* verbose= */ false
-      );
-      
-      scanner.render((decodedText) => {
-        const cleanCode = decodedText.trim();
-        setIsScanning(false);
-        scanner?.clear();
-        handleBarcodeScan(cleanCode);
-      }, () => {
-        // quiet
-      });
-    }
-
-    return () => {
-      if (scanner) {
-        scanner.clear().catch(e => console.error("Failed to clear scanner", e));
-      }
-    };
-  }, [isScanning, products]);
 
   const addToCart = (product: any) => {
     const existing = cart.find(item => item.id === product.id);
@@ -704,28 +683,14 @@ export default function QuickBill() {
       </div>
 
       {/* Barcode Camera Scanner Modal */}
-      <AnimatePresence>
-        {isScanning && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
-          >
-            <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-[32px] w-full max-w-lg overflow-hidden relative shadow-2xl">
-              <div className="p-6 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
-                <h3 className="text-sm font-bold uppercase tracking-widest text-slate-800 dark:text-gray-400">Barcode Scanner</h3>
-                <button type="button" onClick={() => setIsScanning(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-white/5 rounded-full cursor-pointer"><X size={20}/></button>
-              </div>
-              <div className="p-8">
-                <div id="barcode-reader" className="w-full aspect-square rounded-2xl overflow-hidden bg-slate-100 dark:bg-black/40"></div>
-                <p className="text-center text-[10px] text-slate-500 dark:text-gray-500 mt-6 font-bold uppercase tracking-widest">Position barcode within the frame</p>
-              </div>
-            </div>
-          </motion.div>
-        )}
+      <BarcodeCameraModal
+        isOpen={isScanning}
+        onClose={() => setIsScanning(false)}
+        onScan={(code) => handleBarcodeScan(code)}
+      />
 
-        {/* Multi-Tender Settlement Modal */}
+      {/* Multi-Tender Settlement Modal */}
+      <AnimatePresence>
         {showCheckoutModal && (
           <motion.div 
             initial={{ opacity: 0 }}
