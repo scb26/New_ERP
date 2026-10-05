@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   QrCode,
   Banknote,
@@ -7,17 +7,22 @@ import {
   Trash2, 
   Plus, 
   Minus, 
-  Zap,
+  Zap, 
   CreditCard,
   User,
   Camera,
   X,
-  CheckCircle2
+  CheckCircle2,
+  Keyboard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Html5QrcodeScanner } from 'html5-qrcode';
+import ThermalReceiptModal, { ReceiptData } from './ThermalReceiptModal';
+import LocalQRCode from './LocalQRCode';
+import { useAuth } from '../context/AuthContext';
 
 export default function QuickBill() {
+  const { token } = useAuth();
   const [cart, setCart] = useState<any[]>([]);
   const [products, setProducts] = useState<any[]>([]);
   const [parties, setParties] = useState<any[]>([]);
@@ -28,6 +33,11 @@ export default function QuickBill() {
   const [showCheckoutModal, setShowCheckoutModal] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [settings, setSettings] = useState<any>(null);
+  const [activeReceipt, setActiveReceipt] = useState<ReceiptData | null>(null);
+
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const barcodeBufferRef = useRef<string>('');
+  const lastKeyTimeRef = useRef<number>(0);
 
   useEffect(() => {
     fetchProducts();
@@ -48,6 +58,76 @@ export default function QuickBill() {
       .then(data => setProducts(data));
   };
 
+  // 1. Hardware Barcode Scanner Buffer Listener & Keyboard Hotkeys (F2, Esc, Enter)
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      // Hotkey F2: Focus product search
+      if (e.key === 'F2') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+        return;
+      }
+
+      // Hotkey Esc: Close modals or clear search
+      if (e.key === 'Escape') {
+        if (showCheckoutModal) {
+          setShowCheckoutModal(false);
+          setPaymentMethod(null);
+        } else if (isScanning) {
+          setIsScanning(false);
+        } else if (searchTerm) {
+          setSearchTerm('');
+        }
+        return;
+      }
+
+      // Hotkey Enter inside Checkout Modal with selected payment method: trigger completion
+      if (e.key === 'Enter' && showCheckoutModal && paymentMethod && !loading) {
+        e.preventDefault();
+        handleCheckout();
+        return;
+      }
+
+      // Fast hardware barcode scanner buffer detection
+      // Scanners type characters in < 40ms intervals and end with "Enter"
+      const now = Date.now();
+      const timeDiff = now - lastKeyTimeRef.current;
+      lastKeyTimeRef.current = now;
+
+      // Don't intercept when user is typing normally into input elements, unless rapid scanner stream
+      const isInputFocused = document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA';
+
+      if (e.key === 'Enter') {
+        const scannedCode = barcodeBufferRef.current.trim();
+        barcodeBufferRef.current = '';
+        if (scannedCode.length >= 3) {
+          const matched = products.find(
+            p => p.barcode === scannedCode || p.id === scannedCode || p.name.toLowerCase() === scannedCode.toLowerCase()
+          );
+          if (matched) {
+            addToCart(matched);
+            if (isInputFocused && document.activeElement === searchInputRef.current) {
+              setSearchTerm('');
+            }
+          }
+        }
+      } else if (e.key.length === 1) {
+        // If keystrokes are coming in rapidly (< 50ms) or we started buffering
+        if (timeDiff < 50 || barcodeBufferRef.current.length > 0) {
+          barcodeBufferRef.current += e.key;
+        } else {
+          // Reset buffer if standard human typing speed
+          barcodeBufferRef.current = e.key;
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [products, showCheckoutModal, paymentMethod, loading, isScanning, searchTerm]);
+
+  // 2. Camera Barcode Scanner
   useEffect(() => {
     let scanner: Html5QrcodeScanner | null = null;
     if (isScanning) {
@@ -58,13 +138,15 @@ export default function QuickBill() {
       );
       
       scanner.render((decodedText) => {
-        const product = products.find(p => p.id === decodedText || p.name.toLowerCase() === decodedText.toLowerCase());
+        const product = products.find(
+          p => p.id === decodedText || p.barcode === decodedText || p.name.toLowerCase() === decodedText.toLowerCase()
+        );
         if (product) {
           addToCart(product);
           setIsScanning(false);
           scanner?.clear();
         }
-      }, (error) => {
+      }, () => {
         // quiet
       });
     }
@@ -78,10 +160,18 @@ export default function QuickBill() {
 
   const addToCart = (product: any) => {
     const existing = cart.find(item => item.id === product.id);
+    const itemPrice = product.sellPrice || product.price || 0;
+    const itemTaxRate = product.gstRate !== undefined ? Number(product.gstRate) : 18;
     if (existing) {
       setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
     } else {
-      setCart([...cart, { ...product, qty: 1 }]);
+      setCart([...cart, { 
+        ...product, 
+        price: itemPrice, 
+        gstRate: itemTaxRate,
+        hsnCode: product.hsnCode || '',
+        qty: 1 
+      }]);
     }
   };
 
@@ -95,6 +185,11 @@ export default function QuickBill() {
     }));
   };
 
+  const setDirectQty = (id: string, qty: number) => {
+    const validQty = Math.max(1, isNaN(qty) ? 1 : qty);
+    setCart(cart.map(item => item.id === id ? { ...item, qty: validQty } : item));
+  };
+
   const removeFromCart = (id: string) => {
     setCart(cart.filter(item => item.id !== id));
   };
@@ -104,8 +199,17 @@ export default function QuickBill() {
     setSelectedParty(null);
   };
 
+  // Per-item GST Tax calculation & Section 170 Round-off
   const subtotal = cart.reduce((acc, item) => acc + (item.price * item.qty), 0);
-  const totalAmount = subtotal * 1.18; // 18% GST
+  const totalTax = cart.reduce((acc, item) => {
+    const rate = item.gstRate !== undefined ? item.gstRate : 18;
+    return acc + (item.price * item.qty * rate) / 100;
+  }, 0);
+  
+  const unroundedTotal = subtotal + totalTax;
+  const roundedTotal = Math.round(unroundedTotal);
+  const roundOff = +(roundedTotal - unroundedTotal).toFixed(2);
+  const totalAmount = roundedTotal;
 
   const [showPartyList, setShowPartyList] = useState(false);
 
@@ -113,24 +217,62 @@ export default function QuickBill() {
     if (cart.length === 0) return;
     setLoading(true);
     try {
-      await fetch('/api/invoices', {
+      const payload = {
+        items: cart,
+        subtotal,
+        tax: totalTax,
+        total: totalAmount,
+        customer: selectedParty ? selectedParty.name : 'Walk-in Customer',
+        customerId: selectedParty?.id,
+        paymentMethod: paymentMethod || 'cash'
+      };
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+
+      const res = await fetch('/api/invoices', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          items: cart,
-          total: totalAmount,
-          customer: selectedParty ? selectedParty.name : 'Walk-in Customer',
-          paymentMethod
-        })
+        headers,
+        body: JSON.stringify(payload)
       });
+      const createdInvoice = await res.json();
       fetchProducts(); // Refresh stock
+
+      // Prepare receipt for thermal slip & WhatsApp
+      setActiveReceipt({
+        invoiceId: createdInvoice.id,
+        date: createdInvoice.date || new Date().toISOString(),
+        customerName: selectedParty ? selectedParty.name : 'Walk-in Customer',
+        customerPhone: selectedParty?.phone || '',
+        items: cart.map(i => ({
+          id: i.id,
+          name: i.name,
+          qty: i.qty,
+          price: i.price,
+          hsnCode: i.hsnCode,
+          gstRate: i.gstRate !== undefined ? i.gstRate : 18
+        })),
+        subtotal,
+        totalTax,
+        roundOff: createdInvoice.roundOff !== undefined ? createdInvoice.roundOff : roundOff,
+        totalAmount: createdInvoice.total || totalAmount,
+        paymentMethod: paymentMethod || 'cash',
+        business: {
+          name: settings?.businessName,
+          address: settings?.address,
+          gstNumber: settings?.gstNumber,
+          phone: settings?.phone,
+          upiId: settings?.upiId
+        }
+      });
+
       setCart([]);
       setSelectedParty(null);
       setPaymentMethod(null);
       setShowCheckoutModal(false);
-      alert('Quick Bill Completed!');
     } catch (error) {
       console.error(error);
+      alert('Failed to complete billing. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -138,6 +280,7 @@ export default function QuickBill() {
 
   const filteredProducts = products.filter(p => 
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (p.barcode && p.barcode.includes(searchTerm)) ||
     p.id.toLowerCase().includes(searchTerm.toLowerCase())
   );
 
@@ -145,19 +288,26 @@ export default function QuickBill() {
     <div className="grid grid-cols-1 xl:grid-cols-[1fr_420px] gap-8 xl:h-[calc(100vh-160px)] min-h-0">
       {/* Product Selection Area */}
       <div className="flex flex-col gap-6 xl:overflow-hidden min-h-[400px]">
+        {/* Search & Action Bar */}
         <div className="flex items-center gap-4">
           <div className="flex-1 relative">
-            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500" size={18} />
+            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-gray-500" size={18} />
             <input 
-              placeholder="Scan barcode or type name..."
-              className="w-full bg-[#0A0A0A] border border-white/10 rounded-2xl pl-12 pr-4 py-4 focus:outline-none focus:border-blue-500/50 transition-all font-medium text-sm"
+              ref={searchInputRef}
+              placeholder="Scan barcode or type name... (Press F2 to focus)"
+              className="w-full bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-2xl pl-12 pr-16 py-4 focus:outline-none focus:border-blue-500/50 transition-all font-medium text-sm text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-gray-600 shadow-xs dark:shadow-none"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
             />
+            <span className="absolute right-4 top-1/2 -translate-y-1/2 text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-slate-100 dark:bg-white/10 text-slate-500 dark:text-gray-400 hidden sm:inline-block">
+              F2
+            </span>
           </div>
+
           <button 
+            type="button"
             onClick={() => setIsScanning(true)}
-            className="px-6 h-14 bg-blue-600 text-white rounded-2xl flex items-center gap-3 hover:bg-blue-700 transition-all shadow-[0_10px_20px_rgba(37,99,235,0.3)] active:scale-95 group"
+            className="px-6 h-14 bg-blue-600 text-white rounded-2xl flex items-center gap-3 hover:bg-blue-700 transition-all shadow-[0_10px_20px_rgba(37,99,235,0.3)] active:scale-95 group cursor-pointer shrink-0"
           >
             <div className="relative">
               <Camera size={20} className="group-hover:rotate-6 transition-transform" />
@@ -167,26 +317,34 @@ export default function QuickBill() {
           </button>
         </div>
 
+        {/* Product Grid */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-3 gap-4 overflow-y-auto pr-2 custom-scrollbar pb-8">
           {filteredProducts.map(p => (
             <motion.div 
               whileHover={{ y: -4 }}
               key={p.id}
               onClick={() => addToCart(p)}
-              className="bg-[#0A0A0A] border border-white/5 p-4 rounded-3xl cursor-pointer hover:border-blue-500/30 transition-all group flex flex-col"
+              className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/5 p-4 rounded-3xl cursor-pointer hover:border-blue-500/40 transition-all group flex flex-col shadow-xs dark:shadow-none"
             >
-              <div className="aspect-square bg-[#111111] rounded-2xl mb-4 flex items-center justify-center text-2xl font-black text-gray-800 group-hover:text-blue-500 transition-colors relative overflow-hidden">
-                {p.name.charAt(0)}
+              <div className="aspect-square bg-slate-100 dark:bg-[#111111] rounded-2xl mb-4 flex items-center justify-center text-2xl font-black text-slate-600 dark:text-gray-800 group-hover:text-blue-500 transition-colors relative overflow-hidden">
+                {p.image ? (
+                  <img src={p.image} alt={p.name} className="w-full h-full object-cover" />
+                ) : (
+                  p.name.charAt(0)
+                )}
                 {p.stock <= 5 && (
-                  <div className="absolute top-2 right-2 px-2 py-1 bg-red-500/10 text-red-500 text-[8px] font-bold rounded-md">
+                  <div className="absolute top-2 right-2 px-2 py-1 bg-red-500/10 text-red-600 dark:text-red-500 text-[8px] font-bold rounded-md">
                     LOW STOCK
                   </div>
                 )}
+                <span className="absolute bottom-2 left-2 px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400 text-[8px] font-black">
+                  GST {p.gstRate !== undefined ? p.gstRate : 18}%
+                </span>
               </div>
-              <h4 className="font-bold text-gray-200 truncate text-sm">{p.name}</h4>
+              <h4 className="font-bold text-slate-900 dark:text-gray-200 truncate text-sm">{p.name}</h4>
               <div className="flex items-center justify-between mt-2">
-                <span className="text-blue-500 font-black text-sm">₹{p.price}</span>
-                <span className="text-[10px] font-bold text-gray-600 uppercase tracking-widest">{p.stock} Units</span>
+                <span className="text-blue-600 dark:text-blue-500 font-black text-sm">₹{p.sellPrice || p.price}</span>
+                <span className="text-[10px] font-bold text-slate-500 dark:text-gray-600 uppercase tracking-widest">{p.stock} Units</span>
               </div>
             </motion.div>
           ))}
@@ -194,31 +352,41 @@ export default function QuickBill() {
       </div>
 
       {/* Cart & Checkout Area */}
-      <div className="bg-[#0A0A0A] border border-white/10 rounded-[40px] flex flex-col overflow-hidden shadow-2xl">
-        <div className="p-6 md:p-8 border-b border-white/5 relative">
+      <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-[40px] flex flex-col overflow-hidden shadow-xl dark:shadow-2xl">
+        <div className="p-6 md:p-8 border-b border-slate-100 dark:border-white/5 relative">
           <div className="flex items-center justify-between mb-6">
-            <h3 className="text-xl font-bold flex items-center gap-3">
+            <h3 className="text-xl font-bold flex items-center gap-3 text-slate-900 dark:text-white">
               <ShoppingCart size={20} className="text-blue-500" /> Cart
             </h3>
             <div className="flex items-center gap-2">
-              <span className="px-3 py-1 bg-blue-500/10 text-blue-500 rounded-full text-[10px] font-bold uppercase tracking-widest">
+              <span className="px-3 py-1 bg-blue-500/10 text-blue-600 dark:text-blue-400 rounded-full text-[10px] font-bold uppercase tracking-widest">
                 {cart.length} Items
               </span>
+              {cart.length > 0 && (
+                <button
+                  type="button"
+                  onClick={clearCart}
+                  className="text-[10px] font-bold text-red-500 hover:text-red-700 uppercase tracking-wider px-2 py-1 cursor-pointer"
+                >
+                  Clear
+                </button>
+              )}
             </div>
           </div>
           
           <button 
+            type="button"
             onClick={() => setShowPartyList(!showPartyList)}
-            className="w-full p-4 bg-[#111111] border border-white/5 rounded-2xl flex items-center gap-3 hover:bg-[#161616] transition-colors group"
+            className="w-full p-4 bg-slate-50 dark:bg-[#111111] border border-slate-200 dark:border-white/5 rounded-2xl flex items-center gap-3 hover:bg-slate-100 dark:hover:bg-[#161616] transition-colors group cursor-pointer"
           >
-             <div className="w-10 h-10 rounded-full bg-white/5 flex items-center justify-center text-gray-500 group-hover:text-white transition-colors">
+             <div className="w-10 h-10 rounded-full bg-slate-200 dark:bg-white/5 flex items-center justify-center text-slate-600 dark:text-gray-500 group-hover:text-blue-600 dark:group-hover:text-white transition-colors">
                 <User size={18} />
              </div>
-             <div className="text-left flex-1">
-                <p className="text-[10px] font-bold text-gray-600 uppercase tracking-widest leading-none mb-1">Customer</p>
-                <p className="text-sm font-bold text-gray-300 truncate max-w-[150px]">{selectedParty ? selectedParty.name : 'Walk-in Customer'}</p>
+             <div className="text-left flex-1 min-w-0">
+                <p className="text-[10px] font-bold text-slate-500 dark:text-gray-600 uppercase tracking-widest leading-none mb-1">Customer</p>
+                <p className="text-sm font-bold text-slate-900 dark:text-gray-300 truncate">{selectedParty ? selectedParty.name : 'Walk-in Customer'}</p>
              </div>
-             <Plus className={`text-gray-600 transition-transform ${showPartyList ? 'rotate-45' : ''}`} size={16} />
+             <Plus className={`text-slate-400 dark:text-gray-600 transition-transform ${showPartyList ? 'rotate-45' : ''}`} size={16} />
           </button>
 
           <AnimatePresence>
@@ -227,11 +395,11 @@ export default function QuickBill() {
                 initial={{ opacity: 0, y: 10 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: 10 }}
-                className="absolute left-8 right-8 top-[140px] bg-[#0F0F0F] border border-white/20 rounded-2xl shadow-[0_30px_60px_rgba(0,0,0,0.8)] z-20 max-h-60 overflow-y-auto custom-scrollbar"
+                className="absolute left-8 right-8 top-[140px] bg-white dark:bg-[#0F0F0F] border border-slate-200 dark:border-white/20 rounded-2xl shadow-2xl z-20 max-h-60 overflow-y-auto custom-scrollbar"
               >
                 <div 
                   onClick={() => { setSelectedParty(null); setShowPartyList(false); }}
-                  className="p-4 hover:bg-white/5 cursor-pointer border-b border-white/5 text-sm font-bold text-blue-500"
+                  className="p-4 hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer border-b border-slate-100 dark:border-white/5 text-sm font-bold text-blue-600 dark:text-blue-500"
                 >
                   Walk-in Customer
                 </div>
@@ -239,10 +407,10 @@ export default function QuickBill() {
                   <div 
                     key={p.id}
                     onClick={() => { setSelectedParty(p); setShowPartyList(false); }}
-                    className="p-4 hover:bg-white/5 cursor-pointer border-b border-white/5 flex flex-col"
+                    className="p-4 hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer border-b border-slate-100 dark:border-white/5 flex flex-col"
                   >
-                    <span className="text-sm font-bold text-gray-200">{p.name}</span>
-                    <span className="text-[10px] text-gray-500 font-medium">Balance: ₹{p.balance}</span>
+                    <span className="text-sm font-bold text-slate-900 dark:text-gray-200">{p.name}</span>
+                    <span className="text-[10px] text-slate-500 dark:text-gray-500 font-medium">Balance: ₹{p.balance}</span>
                   </div>
                 ))}
               </motion.div>
@@ -250,6 +418,7 @@ export default function QuickBill() {
           </AnimatePresence>
         </div>
 
+        {/* Cart Item Rows */}
         <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-4 custom-scrollbar">
           <AnimatePresence initial={false}>
             {cart.map(item => (
@@ -259,72 +428,116 @@ export default function QuickBill() {
                 animate={{ opacity: 1, x: 0 }}
                 exit={{ opacity: 0, x: -20 }}
                 key={item.id}
-                className="flex items-center gap-3 md:gap-4 bg-[#111111] p-3 md:p-4 rounded-2xl group border border-transparent hover:border-white/5 transition-all text-xs"
+                className="flex items-center gap-3 md:gap-4 bg-slate-50 dark:bg-[#111111] p-3 md:p-4 rounded-2xl group border border-slate-100 dark:border-transparent hover:border-blue-500/20 dark:hover:border-white/5 transition-all text-xs"
               >
                 <div className="flex-1 min-w-0">
-                  <h4 className="text-sm font-bold truncate text-gray-200 tracking-tight">{item.name}</h4>
-                  <p className="text-xs text-blue-500 font-black">₹{(item.price * item.qty).toLocaleString()}</p>
+                  <h4 className="text-sm font-bold truncate text-slate-900 dark:text-gray-200 tracking-tight">{item.name}</h4>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <p className="text-xs text-blue-600 dark:text-blue-500 font-black">₹{(item.price * item.qty).toLocaleString()}</p>
+                    <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-blue-500/10 text-blue-600 dark:text-blue-400">
+                      +{item.gstRate !== undefined ? item.gstRate : 18}% GST
+                    </span>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 bg-black/40 rounded-xl p-1 border border-white/5">
-                  <button onClick={() => updateQty(item.id, -1)} className="w-6 h-6 flex items-center justify-center hover:text-white text-gray-600 transition-colors"><Minus size={12} /></button>
-                  <span className="text-xs font-bold w-4 text-center">{item.qty}</span>
-                  <button onClick={() => updateQty(item.id, 1)} className="w-6 h-6 flex items-center justify-center hover:text-white text-gray-600 transition-colors"><Plus size={12} /></button>
+
+                {/* Direct Quantity Input + Incrementor */}
+                <div className="flex items-center gap-1.5 bg-white dark:bg-black/40 rounded-xl p-1 border border-slate-200 dark:border-white/5 shadow-xs">
+                  <button 
+                    type="button"
+                    onClick={() => updateQty(item.id, -1)} 
+                    className="w-6 h-6 flex items-center justify-center hover:text-blue-600 dark:hover:text-white text-slate-500 dark:text-gray-600 transition-colors cursor-pointer"
+                  >
+                    <Minus size={12} />
+                  </button>
+                  <input
+                    type="number"
+                    min="1"
+                    value={item.qty}
+                    onChange={(e) => setDirectQty(item.id, parseInt(e.target.value, 10))}
+                    className="text-xs font-black w-8 text-center bg-transparent border-none outline-none text-slate-900 dark:text-white [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                    title="Click to type quantity directly"
+                  />
+                  <button 
+                    type="button"
+                    onClick={() => updateQty(item.id, 1)} 
+                    className="w-6 h-6 flex items-center justify-center hover:text-blue-600 dark:hover:text-white text-slate-500 dark:text-gray-600 transition-colors cursor-pointer"
+                  >
+                    <Plus size={12} />
+                  </button>
                 </div>
-                <button onClick={() => removeFromCart(item.id)} className="text-gray-700 hover:text-red-500 transition-colors"><Trash2 size={16} /></button>
+
+                <button 
+                  type="button"
+                  onClick={() => removeFromCart(item.id)} 
+                  className="text-slate-400 hover:text-red-500 transition-colors cursor-pointer"
+                >
+                  <Trash2 size={16} />
+                </button>
               </motion.div>
             ))}
           </AnimatePresence>
+
           {cart.length === 0 && (
-            <div className="h-full flex flex-col items-center justify-center text-gray-700 space-y-4 opacity-10 py-12 text-center grayscale">
+            <div className="h-full flex flex-col items-center justify-center text-slate-400 dark:text-gray-700 space-y-4 opacity-30 py-12 text-center">
               <ShoppingCart size={48} />
-              <p className="text-[10px] font-black uppercase tracking-[0.2em]">Scan item or search to start</p>
+              <p className="text-[10px] font-black uppercase tracking-[0.2em]">Scan barcode or search to start</p>
             </div>
           )}
         </div>
 
-        <div className="p-6 md:p-8 bg-[#0D0D0D] border-t border-white/5 space-y-6">
-          <div className="space-y-3">
-             <div className="flex justify-between text-[10px] font-bold text-gray-600 uppercase tracking-widest">
-                <span>Subtotal</span>
-                <span className="text-gray-300">₹{subtotal.toLocaleString()}</span>
+        {/* Totals & Section 170 Round-off */}
+        <div className="p-6 md:p-8 bg-slate-50 dark:bg-[#0D0D0D] border-t border-slate-200 dark:border-white/5 space-y-5">
+          <div className="space-y-2.5">
+             <div className="flex justify-between text-[11px] font-bold text-slate-500 dark:text-gray-500 uppercase tracking-widest">
+                <span>Subtotal (Taxable)</span>
+                <span className="text-slate-800 dark:text-gray-300 font-mono">₹{subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
              </div>
-             <div className="flex justify-between text-[10px] font-bold text-gray-600 uppercase tracking-widest">
-                <span>GST (18%)</span>
-                <span className="text-gray-300">₹{(subtotal * 0.18).toLocaleString()}</span>
+             <div className="flex justify-between text-[11px] font-bold text-slate-500 dark:text-gray-500 uppercase tracking-widest">
+                <span>Total GST</span>
+                <span className="text-slate-800 dark:text-gray-300 font-mono">₹{totalTax.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
              </div>
-             <div className="flex justify-between text-2xl font-black text-white pt-4 border-t border-white/5">
-                <span className="tracking-tighter">Total</span>
-                <span className="text-blue-500 tracking-tight">₹{totalAmount.toLocaleString()}</span>
+             {roundOff !== 0 && (
+               <div className="flex justify-between text-[11px] font-bold text-slate-500 dark:text-gray-500 uppercase tracking-widest">
+                  <span>Round Off (Sec 170)</span>
+                  <span className="text-slate-800 dark:text-gray-300 font-mono">
+                    {roundOff > 0 ? `+₹${roundOff.toFixed(2)}` : `-₹${Math.abs(roundOff).toFixed(2)}`}
+                  </span>
+               </div>
+             )}
+             <div className="flex justify-between text-2xl font-black text-slate-900 dark:text-white pt-3 border-t border-slate-200 dark:border-white/5">
+                <span className="tracking-tight">Grand Total</span>
+                <span className="text-blue-600 dark:text-blue-500 tracking-tight font-mono">₹{totalAmount.toLocaleString()}</span>
              </div>
           </div>
 
           <button 
+            type="button"
             disabled={cart.length === 0 || loading}
             onClick={() => setShowCheckoutModal(true)}
-            className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black text-sm shadow-[0_20px_40px_rgba(37,99,235,0.25)] hover:bg-blue-700 transition-all active:scale-95 disabled:opacity-30 flex items-center justify-center gap-3 uppercase tracking-widest"
+            className="w-full py-4 bg-blue-600 text-white rounded-2xl font-black text-sm shadow-[0_20px_40px_rgba(37,99,235,0.25)] hover:bg-blue-700 transition-all active:scale-95 disabled:opacity-30 flex items-center justify-center gap-3 uppercase tracking-widest cursor-pointer"
           >
             <CreditCard size={18} /> Checkout
           </button>
         </div>
       </div>
 
-      {/* Barcode Scanner Modal */}
+      {/* Barcode Camera Scanner Modal */}
       <AnimatePresence>
         {isScanning && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
           >
-            <div className="bg-[#0A0A0A] border border-white/10 rounded-[32px] w-full max-w-lg overflow-hidden relative">
-              <div className="p-6 border-b border-white/5 flex items-center justify-between">
-                <h3 className="text-sm font-bold uppercase tracking-widest text-gray-400">Barcode Scanner</h3>
-                <button onClick={() => setIsScanning(false)} className="p-2 hover:bg-white/5 rounded-full"><X size={20}/></button>
+            <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-[32px] w-full max-w-lg overflow-hidden relative shadow-2xl">
+              <div className="p-6 border-b border-slate-100 dark:border-white/5 flex items-center justify-between">
+                <h3 className="text-sm font-bold uppercase tracking-widest text-slate-800 dark:text-gray-400">Barcode Scanner</h3>
+                <button type="button" onClick={() => setIsScanning(false)} className="p-2 hover:bg-slate-100 dark:hover:bg-white/5 rounded-full cursor-pointer"><X size={20}/></button>
               </div>
               <div className="p-8">
-                <div id="barcode-reader" className="w-full aspect-square rounded-2xl overflow-hidden bg-black/40"></div>
-                <p className="text-center text-[10px] text-gray-500 mt-6 font-bold uppercase tracking-widest">Position barcode within the frame</p>
+                <div id="barcode-reader" className="w-full aspect-square rounded-2xl overflow-hidden bg-slate-100 dark:bg-black/40"></div>
+                <p className="text-center text-[10px] text-slate-500 dark:text-gray-500 mt-6 font-bold uppercase tracking-widest">Position barcode within the frame</p>
               </div>
             </div>
           </motion.div>
@@ -336,40 +549,47 @@ export default function QuickBill() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/90 backdrop-blur-sm p-4"
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
           >
              <motion.div 
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
-              className="bg-[#0A0A0A] border border-white/10 rounded-[40px] w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4"
+              className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-[40px] w-full max-w-lg max-h-[90vh] overflow-hidden flex flex-col shadow-2xl mx-4 text-slate-900 dark:text-white"
              >
-               <div className="p-6 md:p-8 border-b border-white/5 flex items-center justify-between shrink-0">
+               <div className="p-6 md:p-8 border-b border-slate-100 dark:border-white/5 flex items-center justify-between shrink-0">
                   <h3 className="text-lg md:text-xl font-bold">Complete Settlement</h3>
-                  <button onClick={() => { setShowCheckoutModal(false); setPaymentMethod(null); }} className="text-gray-500 hover:text-white"><X size={24}/></button>
+                  <button type="button" onClick={() => { setShowCheckoutModal(false); setPaymentMethod(null); }} className="text-slate-400 hover:text-slate-800 dark:hover:text-white cursor-pointer"><X size={24}/></button>
                </div>
 
                <div className="p-6 md:p-8 space-y-8 overflow-y-auto flex-1 custom-scrollbar">
                   <div className="text-center">
-                    <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">Payable Amount</p>
-                    <p className="text-5xl font-black text-white">₹{totalAmount.toLocaleString()}</p>
+                    <p className="text-[10px] font-black text-slate-500 dark:text-gray-500 uppercase tracking-widest mb-1">Payable Amount (Rounded)</p>
+                    <p className="text-5xl font-black text-slate-950 dark:text-white">₹{totalAmount.toLocaleString()}</p>
+                    {roundOff !== 0 && (
+                      <p className="text-xs text-slate-500 dark:text-gray-400 mt-1">
+                        Sec 170 Round-off: {roundOff > 0 ? `+₹${roundOff.toFixed(2)}` : `-₹${Math.abs(roundOff).toFixed(2)}`}
+                      </p>
+                    )}
                   </div>
 
                   {!paymentMethod ? (
                     <div className="space-y-4">
-                      <p className="text-xs font-bold text-center text-gray-600 uppercase tracking-widest">Select Payment Method</p>
+                      <p className="text-xs font-bold text-center text-slate-500 dark:text-gray-500 uppercase tracking-widest">Select Payment Method</p>
                       <div className="grid grid-cols-2 gap-4">
                         <button 
+                          type="button"
                           onClick={() => setPaymentMethod('cash')}
-                          className="flex flex-col items-center justify-center p-6 bg-[#111111] border border-white/5 rounded-3xl gap-4 hover:bg-blue-600 group transition-all"
+                          className="flex flex-col items-center justify-center p-6 bg-slate-50 dark:bg-[#111111] border border-slate-200 dark:border-white/5 rounded-3xl gap-4 hover:bg-blue-600 hover:text-white group transition-all cursor-pointer shadow-xs"
                         >
-                          <Banknote size={32} className="text-gray-500 group-hover:text-white" />
+                          <Banknote size={32} className="text-slate-500 dark:text-gray-500 group-hover:text-white" />
                           <span className="text-[10px] font-black uppercase tracking-widest group-hover:text-white">Cash Paid</span>
                         </button>
                         <button 
+                          type="button"
                           onClick={() => setPaymentMethod('upi')}
-                          className="flex flex-col items-center justify-center p-6 bg-[#111111] border border-white/5 rounded-3xl gap-4 hover:bg-blue-600 group transition-all"
+                          className="flex flex-col items-center justify-center p-6 bg-slate-50 dark:bg-[#111111] border border-slate-200 dark:border-white/5 rounded-3xl gap-4 hover:bg-blue-600 hover:text-white group transition-all cursor-pointer shadow-xs"
                         >
-                          <QrCode size={32} className="text-gray-500 group-hover:text-white" />
+                          <QrCode size={32} className="text-slate-500 dark:text-gray-500 group-hover:text-white" />
                           <span className="text-[10px] font-black uppercase tracking-widest group-hover:text-white">UPI QR</span>
                         </button>
                       </div>
@@ -378,40 +598,44 @@ export default function QuickBill() {
                     <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="space-y-6">
                       {paymentMethod === 'upi' ? (
                         <div className="flex flex-col items-center gap-6">
-                           <div className="bg-white p-4 rounded-3xl shadow-2xl">
-                              <img 
-                                src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=upi://pay?pa=${settings?.upiId || 'merchant@upi'}&pn=${encodeURIComponent(settings?.businessName || 'Unidex ERP')}&am=${totalAmount}&cu=INR`} 
-                                alt="UPI QR"
-                                className="w-48 h-48"
+                           <div className="bg-white p-4 rounded-3xl shadow-xl border border-slate-200">
+                              {/* Local QR Code Generator without external CDN/API dependency */}
+                              <LocalQRCode 
+                                value={`upi://pay?pa=${settings?.upiId || 'merchant@upi'}&pn=${encodeURIComponent(settings?.businessName || 'Unidex ERP')}&am=${totalAmount}&cu=INR`}
+                                size={190}
                               />
                            </div>
                            <div className="text-center">
-                             <p className="text-sm font-bold mb-1">Scan with any UPI App</p>
-                             <p className="text-[10px] text-gray-500 font-bold uppercase tracking-widest">Pay to: {settings?.upiId || 'merchant@upi'}</p>
+                             <p className="text-sm font-bold mb-1">Scan with GPay, PhonePe, Paytm, BHIM</p>
+                             <p className="text-[10px] text-slate-500 dark:text-gray-400 font-bold uppercase tracking-widest font-mono">
+                               Pay to: {settings?.upiId || 'merchant@upi'}
+                             </p>
                            </div>
                         </div>
                       ) : (
-                        <div className="bg-blue-600/10 border border-blue-500/20 p-8 rounded-3xl text-center space-y-4">
-                           <Banknote size={48} className="mx-auto text-blue-500" />
+                        <div className="bg-blue-50 dark:bg-blue-600/10 border border-blue-200 dark:border-blue-500/20 p-8 rounded-3xl text-center space-y-4">
+                           <Banknote size={48} className="mx-auto text-blue-600 dark:text-blue-500" />
                            <div>
-                             <p className="text-lg font-bold">Collect ₹{totalAmount.toLocaleString()} in Cash</p>
-                             <p className="text-xs text-blue-500/80 font-medium">Verify the currency before completing</p>
+                             <p className="text-lg font-bold text-slate-900 dark:text-white">Collect ₹{totalAmount.toLocaleString()} in Cash</p>
+                             <p className="text-xs text-blue-600/80 dark:text-blue-500/80 font-medium">Verify tender currency notes before completing</p>
                            </div>
                         </div>
                       )}
 
                       <div className="grid grid-cols-2 gap-4 pt-4">
                         <button 
+                          type="button"
                           onClick={() => setPaymentMethod(null)}
-                          className="py-4 bg-[#111111] border border-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-white transition-all"
+                          className="py-4 bg-slate-100 dark:bg-[#111111] border border-slate-200 dark:border-white/5 rounded-2xl text-[10px] font-black uppercase tracking-widest text-slate-600 dark:text-gray-400 hover:text-slate-900 dark:hover:text-white transition-all cursor-pointer"
                         >
-                          Back
+                          Back (Esc)
                         </button>
                         <button 
+                          type="button"
                           onClick={handleCheckout}
-                          className="py-4 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl shadow-blue-900/20 hover:bg-blue-700 transition-all flex items-center justify-center gap-2"
+                          className="py-4 bg-blue-600 text-white rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-xl shadow-blue-900/20 hover:bg-blue-700 transition-all flex items-center justify-center gap-2 cursor-pointer"
                         >
-                          <CheckCircle2 size={16} /> Complete Order
+                          <CheckCircle2 size={16} /> Confirm Order (Enter)
                         </button>
                       </div>
                     </motion.div>
@@ -421,6 +645,14 @@ export default function QuickBill() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Thermal Receipt & WhatsApp Modal */}
+      {activeReceipt && (
+        <ThermalReceiptModal 
+          receipt={activeReceipt} 
+          onClose={() => setActiveReceipt(null)} 
+        />
+      )}
     </div>
   );
 }

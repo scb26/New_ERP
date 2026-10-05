@@ -12,19 +12,19 @@ import {
 import { motion } from 'motion/react';
 
 const StatCard = ({ label, value, trend, trendType, icon: Icon }: any) => (
-  <div className="bg-[#0A0A0A] border border-white/5 p-6 rounded-[24px] relative overflow-hidden group hover:border-blue-500/20 transition-all">
+  <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/5 p-6 rounded-[24px] relative overflow-hidden group hover:border-blue-500/30 transition-all shadow-xs dark:shadow-none">
     <div className="flex justify-between items-start mb-4">
-      <div className="w-12 h-12 bg-blue-500/5 rounded-xl flex items-center justify-center text-blue-500">
+      <div className="w-12 h-12 bg-blue-500/10 rounded-xl flex items-center justify-center text-blue-500">
         <Icon size={24} />
       </div>
-      <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full ${trendType === 'up' ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500'}`}>
+      <div className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-full ${trendType === 'up' ? 'bg-green-500/10 text-green-600 dark:text-green-500' : 'bg-red-500/10 text-red-600 dark:text-red-500'}`}>
         {trendType === 'up' ? <ArrowUpRight size={10} /> : <ArrowDownRight size={10} />}
         {trend}
       </div>
     </div>
-    <p className="text-gray-500 text-xs font-bold uppercase tracking-widest">{label}</p>
-    <h3 className="text-3xl font-black mt-1 text-white tracking-tight">{value}</h3>
-    <div className="absolute -right-4 -bottom-4 opacity-[0.02] group-hover:opacity-[0.05] transition-opacity">
+    <p className="text-slate-500 dark:text-gray-500 text-xs font-bold uppercase tracking-widest">{label}</p>
+    <h3 className="text-3xl font-black mt-1 text-slate-950 dark:text-white tracking-tight">{value}</h3>
+    <div className="absolute -right-4 -bottom-4 opacity-[0.03] dark:opacity-[0.02] group-hover:opacity-[0.07] dark:group-hover:opacity-[0.05] transition-opacity text-slate-900 dark:text-white">
       <Icon size={120} />
     </div>
   </div>
@@ -55,12 +55,12 @@ export default function Dashboard({ onNavigate }: { onNavigate: (mod: any) => vo
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_400px] gap-8">
-        <div className="bg-[#0A0A0A] border border-white/5 rounded-[32px] p-8">
+        <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/5 rounded-[32px] p-8 shadow-xs dark:shadow-none">
           <div className="flex items-center justify-between mb-8">
-            <h3 className="text-xl font-bold">Recent Transactions</h3>
+            <h3 className="text-xl font-bold text-slate-900 dark:text-white">Recent Transactions</h3>
             <button 
               onClick={() => onNavigate('sales')}
-              className="text-xs font-bold text-blue-500 hover:text-white transition-colors"
+              className="text-xs font-bold text-blue-600 dark:text-blue-500 hover:text-blue-800 dark:hover:text-white transition-colors cursor-pointer"
             >
               View All Invoices
             </button>
@@ -68,7 +68,7 @@ export default function Dashboard({ onNavigate }: { onNavigate: (mod: any) => vo
           
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="text-[10px] font-bold text-gray-600 uppercase tracking-widest border-b border-white/5">
+              <thead className="text-[10px] font-bold text-slate-500 dark:text-gray-600 uppercase tracking-widest border-b border-slate-200 dark:border-white/5">
                 <tr>
                   <th className="py-4 text-left">Invoice ID</th>
                   <th className="py-4 text-left">Customer</th>
@@ -79,18 +79,18 @@ export default function Dashboard({ onNavigate }: { onNavigate: (mod: any) => vo
               </thead>
               <tbody className="text-sm">
                 {stats.recentInvoices.length > 0 ? stats.recentInvoices.map((inv: any) => (
-                  <tr key={inv.id} className="border-b border-white/5 hover:bg-white/2 transition-colors">
-                    <td className="py-4 font-bold text-blue-500">{inv.id}</td>
-                    <td className="py-4 text-gray-300">{inv.customer || 'Walk-in'}</td>
-                    <td className="py-4 text-gray-500 text-xs">{new Date(inv.date).toLocaleDateString()}</td>
-                    <td className="py-4 text-right font-black">₹{inv.total.toLocaleString()}</td>
+                  <tr key={inv.id} className="border-b border-slate-100 dark:border-white/5 hover:bg-slate-50 dark:hover:bg-white/2 transition-colors">
+                    <td className="py-4 font-bold text-blue-600 dark:text-blue-500">{inv.id}</td>
+                    <td className="py-4 text-slate-700 dark:text-gray-300">{inv.customer || 'Walk-in'}</td>
+                    <td className="py-4 text-slate-500 dark:text-gray-500 text-xs">{new Date(inv.date).toLocaleDateString()}</td>
+                    <td className="py-4 text-right font-black text-slate-900 dark:text-white">₹{inv.total.toLocaleString()}</td>
                     <td className="py-4 text-center">
-                      <span className="px-2 py-1 bg-green-500/10 text-green-500 text-[10px] font-bold rounded-md">PAID</span>
+                      <span className="px-2 py-1 bg-green-500/10 text-green-600 dark:text-green-500 text-[10px] font-bold rounded-md">PAID</span>
                     </td>
                   </tr>
                 )) : (
                   <tr>
-                    <td colSpan={5} className="py-20 text-center text-gray-600 font-bold uppercase tracking-widest text-xs">No recent activity detected</td>
+                    <td colSpan={5} className="py-20 text-center text-slate-400 dark:text-gray-600 font-bold uppercase tracking-widest text-xs">No recent activity detected</td>
                   </tr>
                 )}
               </tbody>
@@ -99,24 +99,24 @@ export default function Dashboard({ onNavigate }: { onNavigate: (mod: any) => vo
         </div>
 
         <div className="space-y-6">
-          <div className="bg-[#0A0A0A] border border-white/5 rounded-[32px] p-8">
-            <h3 className="text-xl font-bold mb-6">Quick Actions</h3>
+          <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/5 rounded-[32px] p-8 shadow-xs dark:shadow-none">
+            <h3 className="text-xl font-bold mb-6 text-slate-900 dark:text-white">Quick Actions</h3>
             <div className="space-y-4">
               <button 
                 onClick={() => onNavigate('bill')}
-                className="w-full p-4 bg-blue-600 rounded-2xl flex items-center justify-center gap-3 font-bold text-sm shadow-[0_10px_20px_rgba(37,99,235,0.2)] hover:bg-blue-700 transition-all"
+                className="w-full p-4 bg-blue-600 rounded-2xl flex items-center justify-center gap-3 font-bold text-sm shadow-[0_10px_20px_rgba(37,99,235,0.2)] hover:bg-blue-700 transition-all text-white cursor-pointer"
               >
                 <Plus size={18} /> Create New Invoice
               </button>
               <button 
                 onClick={() => onNavigate('purchases')}
-                className="w-full p-4 bg-orange-600 rounded-2xl flex items-center justify-center gap-3 font-bold text-sm shadow-[0_10px_20px_rgba(234,88,12,0.2)] hover:bg-orange-700 transition-all text-white"
+                className="w-full p-4 bg-orange-600 rounded-2xl flex items-center justify-center gap-3 font-bold text-sm shadow-[0_10px_20px_rgba(234,88,12,0.2)] hover:bg-orange-700 transition-all text-white cursor-pointer"
               >
                 <Truck size={18} /> Record Purchase
               </button>
               <button 
                 onClick={() => onNavigate('inventory')}
-                className="w-full p-4 bg-[#111111] border border-white/5 rounded-2xl flex items-center justify-center gap-3 font-bold text-sm text-gray-300 hover:bg-[#161616] transition-all"
+                className="w-full p-4 bg-slate-100 dark:bg-[#111111] border border-slate-200 dark:border-white/5 rounded-2xl flex items-center justify-center gap-3 font-bold text-sm text-slate-700 dark:text-gray-300 hover:bg-slate-200 dark:hover:bg-[#161616] transition-all cursor-pointer"
               >
                 Add New Product
               </button>

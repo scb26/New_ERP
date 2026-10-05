@@ -14,8 +14,10 @@ import {
   X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { useAuth } from '../context/AuthContext';
 
 export default function Purchases() {
+  const { token } = useAuth();
   const [products, setProducts] = useState<any[]>([]);
   const [vendors, setVendors] = useState<any[]>([]);
   const [cart, setCart] = useState<any[]>([]);
@@ -28,14 +30,22 @@ export default function Purchases() {
   const [newVendor, setNewVendor] = useState({ name: '', phone: '', email: '', balance: 0, type: 'vendor' as const });
 
   useEffect(() => {
-    fetch('/api/products').then(res => res.json()).then(setProducts);
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    fetch('/api/products', { headers }).then(res => res.json()).then(setProducts);
     fetchVendors();
-    fetch('/api/purchases').then(res => res.json()).then(setInvoices);
-  }, []);
+    fetch('/api/purchases', { headers }).then(res => res.json()).then(setInvoices);
+  }, [token]);
 
   const fetchVendors = () => {
-    fetch('/api/parties').then(res => res.json()).then(data => {
-      setVendors(data.filter((p: any) => p.type === 'vendor'));
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    fetch('/api/parties', { headers }).then(res => res.json()).then(data => {
+      if (Array.isArray(data)) {
+        setVendors(data.filter((p: any) => p.type === 'vendor'));
+      }
     });
   };
 
@@ -73,9 +83,12 @@ export default function Purchases() {
     }
     if (cart.length === 0) return;
 
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
     const res = await fetch('/api/purchases', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({
         items: cart,
         total: totalAmount,
@@ -90,7 +103,12 @@ export default function Purchases() {
       setCart([]);
       setSelectedVendor(null);
       // Refresh products (stock increased)
-      fetch('/api/products').then(res => res.json()).then(setProducts);
+      const fetchHeaders: Record<string, string> = {};
+      if (token) fetchHeaders['Authorization'] = `Bearer ${token}`;
+      fetch('/api/products', { headers: fetchHeaders }).then(res => res.json()).then(setProducts);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      alert(err.error || 'Failed to record purchase');
     }
   };
 

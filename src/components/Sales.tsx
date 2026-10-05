@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Parties from './Parties';
+import ThermalReceiptModal, { ReceiptData } from './ThermalReceiptModal';
 
 export default function Sales() {
   const [activeTab, setActiveTab] = useState<'register' | 'parties' | 'create'>('register');
@@ -33,11 +34,14 @@ export default function Sales() {
   const [selectedParty, setSelectedParty] = useState<any>(null);
   const [cart, setCart] = useState<any[]>([]);
   const [gstType, setGstType] = useState<'GST' | 'IGST'>('GST');
+  const [settings, setSettings] = useState<any>(null);
+  const [viewReceipt, setViewReceipt] = useState<ReceiptData | null>(null);
 
   useEffect(() => {
     fetchInvoices();
     fetchParties();
     fetchProducts();
+    fetch('/api/settings').then(r => r.json()).then(data => setSettings(data));
   }, []);
 
   const fetchInvoices = () => {
@@ -64,10 +68,17 @@ export default function Sales() {
   const addToCart = (product: any) => {
     const existing = cart.find(item => item.id === product.id);
     const price = product.sellPrice || product.price || 0;
+    const taxRate = product.gstRate !== undefined ? Number(product.gstRate) : 18;
     if (existing) {
       setCart(cart.map(item => item.id === product.id ? { ...item, qty: item.qty + 1 } : item));
     } else {
-      setCart([...cart, { ...product, price, qty: 1, taxRate: 18 }]);
+      setCart([...cart, { 
+        ...product, 
+        price, 
+        qty: 1, 
+        taxRate,
+        hsnCode: product.hsnCode || '' 
+      }]);
     }
   };
 
@@ -88,13 +99,20 @@ export default function Sales() {
     if (!selectedParty) return alert('Please select a party');
     if (cart.length === 0) return alert('Please add items');
 
+    const unroundedTotal = subtotal + totalTax;
+    const roundedTotal = Math.round(unroundedTotal);
+    const roundOff = +(roundedTotal - unroundedTotal).toFixed(2);
+
     const invoiceData = {
       customer: selectedParty.name,
+      customerId: selectedParty.id,
       items: cart,
       subtotal,
       tax: totalTax,
-      total: totalAmount,
-      gstType
+      roundOff,
+      total: roundedTotal,
+      gstType,
+      paymentMethod: 'credit' // Sales invoice default credit ledger entry
     };
 
     await fetch('/api/invoices', {
@@ -104,6 +122,7 @@ export default function Sales() {
     });
 
     fetchInvoices();
+    fetchParties();
     setActiveTab('register');
     setCart([]);
     setSelectedParty(null);
@@ -115,6 +134,51 @@ export default function Sales() {
   );
 
   const totalSalesValue = invoices.reduce((acc, inv) => acc + (inv.total || 0), 0);
+  const totalGstCollected = invoices.reduce((acc, inv) => {
+    if (inv.tax !== undefined) return acc + Number(inv.tax);
+    if (inv.subtotal && inv.total) return acc + (Number(inv.total) - Number(inv.subtotal));
+    return acc + (Number(inv.total || 0) * 0.18 / 1.18);
+  }, 0);
+
+  const openInvoiceReceipt = (inv: any) => {
+    const invItems = (inv.items || []).map((i: any) => ({
+      id: i.id || `${Date.now()}`,
+      name: i.name || 'Item',
+      qty: i.qty || 1,
+      price: i.price || (i.total ? i.total / (i.qty || 1) : 0),
+      hsnCode: i.hsnCode || '',
+      gstRate: i.gstRate !== undefined ? Number(i.gstRate) : (i.taxRate !== undefined ? Number(i.taxRate) : 18)
+    }));
+
+    const calculatedSubtotal = inv.subtotal !== undefined 
+      ? Number(inv.subtotal) 
+      : invItems.reduce((s: number, i: any) => s + (i.price * i.qty), 0);
+
+    const calculatedTax = inv.tax !== undefined
+      ? Number(inv.tax)
+      : (inv.total ? Number(inv.total) - calculatedSubtotal : 0);
+
+    setViewReceipt({
+      invoiceId: inv.id,
+      date: inv.date || new Date().toISOString(),
+      customerName: inv.customer || 'Walk-in Customer',
+      customerPhone: inv.phone || '',
+      items: invItems,
+      subtotal: calculatedSubtotal,
+      totalTax: calculatedTax,
+      roundOff: inv.roundOff !== undefined ? Number(inv.roundOff) : undefined,
+      totalAmount: Number(inv.total || 0),
+      paymentMethod: inv.paymentMethod || 'cash',
+      gstType: inv.gstType || 'GST',
+      business: {
+        name: settings?.businessName,
+        address: settings?.address,
+        gstNumber: settings?.gstNumber,
+        phone: settings?.phone,
+        upiId: settings?.upiId
+      }
+    });
+  };
 
   return (
     <div className="space-y-6">
@@ -174,7 +238,7 @@ export default function Sales() {
               </div>
               <div className="bg-[#0A0A0A] border border-white/5 p-6 rounded-[24px]">
                 <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">GST Collected</p>
-                <h3 className="text-2xl font-black text-blue-500">₹{(totalSalesValue * 0.18).toLocaleString()}</h3>
+                <h3 className="text-2xl font-black text-blue-500">₹{totalGstCollected.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</h3>
               </div>
             </div>
 
@@ -229,7 +293,11 @@ export default function Sales() {
                       </td>
                       <td className="px-8 py-5 text-right">
                         <div className="flex items-center justify-end gap-2 text-gray-600">
-                          <button className="w-8 h-8 rounded-lg hover:bg-blue-500/10 hover:text-blue-500 flex items-center justify-center transition-all">
+                          <button 
+                            onClick={() => openInvoiceReceipt(inv)}
+                            title="View Thermal Receipt / Share WhatsApp"
+                            className="w-8 h-8 rounded-lg hover:bg-blue-500/10 hover:text-blue-500 flex items-center justify-center transition-all cursor-pointer"
+                          >
                             <Eye size={16} />
                           </button>
                           <button className="w-8 h-8 rounded-lg hover:bg-white/5 flex items-center justify-center transition-all">
@@ -477,6 +545,14 @@ export default function Sales() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Thermal Receipt & WhatsApp Modal */}
+      {viewReceipt && (
+        <ThermalReceiptModal 
+          receipt={viewReceipt} 
+          onClose={() => setViewReceipt(null)} 
+        />
+      )}
     </div>
   );
 }

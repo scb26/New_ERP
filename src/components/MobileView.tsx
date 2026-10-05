@@ -20,15 +20,21 @@ import Inventory from './Inventory';
 import Sales from './Sales';
 import Purchases from './Purchases';
 import AdminModule from './AdminModule';
+import ThemeToggle from './ThemeToggle';
+import { useAuth } from '../context/AuthContext';
+import LoginModal from './LoginModal';
 
 type MobileModule = 'dashboard' | 'sales' | 'inventory' | 'purchases' | 'settings' | 'scanner';
 
 export default function MobileView() {
+  const { user, isLoginModalOpen, setIsLoginModalOpen } = useAuth();
+  const isCashier = user?.role === 'cashier';
   const [activeTab, setActiveTab] = useState<MobileModule>('dashboard');
   const [cart, setCart] = useState<any[]>([]);
   const [isScanning, setIsScanning] = useState(false);
   const [products, setProducts] = useState<any[]>([]);
   const [showCart, setShowCart] = useState(false);
+
 
   useEffect(() => {
     fetch('/api/products')
@@ -146,8 +152,32 @@ export default function MobileView() {
   };
 
   return (
-    <div className="fixed inset-0 bg-black text-white flex flex-col overflow-hidden select-none">
+    <div className="fixed inset-0 bg-slate-50 text-slate-900 dark:bg-black dark:text-white flex flex-col overflow-hidden select-none transition-colors duration-200">
       
+      {/* Mobile Top Header Bar (when not in full screen scanner) */}
+      {activeTab !== 'scanner' && (
+        <header className="h-14 px-4 bg-white/80 dark:bg-[#0D0D0D]/80 backdrop-blur-md border-b border-slate-200 dark:border-white/10 flex items-center justify-between shrink-0 z-30">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse"></span>
+            <h1 className="text-sm font-black uppercase tracking-wider bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-white dark:to-gray-400 bg-clip-text text-transparent">
+              Unidex ERP
+            </h1>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsLoginModalOpen(true)}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-100 dark:bg-[#1A1A1A] border border-slate-200 dark:border-white/10 text-[10px] font-bold"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                user?.role === 'admin' ? 'bg-red-500' : user?.role === 'cashier' ? 'bg-emerald-500' : 'bg-blue-500'
+              }`} />
+              <span className="capitalize">{user?.role || 'Guest'}</span>
+            </button>
+            <ThemeToggle />
+          </div>
+        </header>
+      )}
+
       {/* Main Content Area - Scrollable */}
       <main className="flex-1 overflow-hidden relative">
         <AnimatePresence mode="wait" initial={false}>
@@ -159,7 +189,7 @@ export default function MobileView() {
             transition={{ 
               type: 'spring', 
               stiffness: 500, 
-              damping: 40,
+              damping: 40, 
               mass: 0.5
             }}
             className="h-full overflow-y-auto p-4 pb-20 custom-scrollbar"
@@ -180,7 +210,7 @@ export default function MobileView() {
           >
             <div 
               onClick={() => setShowCart(true)}
-              className="bg-blue-600 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-blue-900/40"
+              className="bg-blue-600 rounded-2xl p-4 flex items-center justify-between shadow-lg shadow-blue-900/40 text-white cursor-pointer"
             >
               <div className="flex items-center gap-3">
                 <ReceiptText size={18} />
@@ -193,7 +223,7 @@ export default function MobileView() {
       </AnimatePresence>
 
       {/* Bottom Navigation - Static/Docked */}
-      <nav className="bg-[#0D0D0D] border-t border-white/10 h-20 px-4 flex items-center justify-between relative z-[80] shadow-2xl">
+      <nav className="bg-white dark:bg-[#0D0D0D] border-t border-slate-200 dark:border-white/10 h-20 px-4 flex items-center justify-between relative z-[80] shadow-2xl">
         <button 
           onClick={() => setActiveTab('dashboard')}
           className={`flex flex-col items-center justify-center gap-1 flex-1 transition-all ${activeTab === 'dashboard' ? 'text-blue-500' : 'text-gray-600'}`}
@@ -217,7 +247,7 @@ export default function MobileView() {
               setActiveTab('scanner');
               setIsScanning(true);
             }}
-            className={`w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-90 border-4 border-[#0D0D0D] ${activeTab === 'scanner' ? 'bg-white text-black' : 'bg-blue-600 text-white shadow-blue-900/60'}`}
+            className={`w-14 h-14 rounded-full flex items-center justify-center shadow-2xl transition-all active:scale-90 border-4 border-slate-50 dark:border-[#0D0D0D] ${activeTab === 'scanner' ? 'bg-white text-black' : 'bg-blue-600 text-white shadow-blue-900/60'}`}
           >
             <Scan size={24} />
           </button>
@@ -231,22 +261,31 @@ export default function MobileView() {
           <span className="text-[8px] font-black uppercase tracking-tighter">Stock</span>
         </button>
 
-        <button 
-          onClick={() => setActiveTab('purchases')}
-          className={`flex flex-col items-center justify-center gap-1 flex-1 transition-all ${activeTab === 'purchases' ? 'text-orange-500' : 'text-gray-600'}`}
-        >
-          <Truck size={20} />
-          <span className="text-[8px] font-black uppercase tracking-tighter">Procure</span>
-        </button>
+        {!isCashier && (
+          <button 
+            onClick={() => setActiveTab('purchases')}
+            className={`flex flex-col items-center justify-center gap-1 flex-1 transition-all ${activeTab === 'purchases' ? 'text-orange-500' : 'text-gray-600'}`}
+          >
+            <Truck size={20} />
+            <span className="text-[8px] font-black uppercase tracking-tighter">Procure</span>
+          </button>
+        )}
 
-        <button 
-          onClick={() => setActiveTab('settings')}
-          className={`flex flex-col items-center justify-center gap-1 flex-1 transition-all ${activeTab === 'settings' ? 'text-blue-500' : 'text-gray-600'}`}
-        >
-          <Settings2 size={22} />
-          <span className="text-[8px] font-black uppercase tracking-tighter">Admin</span>
-        </button>
+        {!isCashier && (
+          <button 
+            onClick={() => setActiveTab('settings')}
+            className={`flex flex-col items-center justify-center gap-1 flex-1 transition-all ${activeTab === 'settings' ? 'text-blue-500' : 'text-gray-600'}`}
+          >
+            <Settings2 size={22} />
+            <span className="text-[8px] font-black uppercase tracking-tighter">Admin</span>
+          </button>
+        )}
       </nav>
+
+      <LoginModal 
+        isOpen={isLoginModalOpen} 
+        onClose={() => setIsLoginModalOpen(false)} 
+      />
     </div>
   );
 }

@@ -8,19 +8,29 @@ import {
   ArrowUpRight,
   Filter,
   Truck,
-  LayoutGrid
+  LayoutGrid,
+  FileSpreadsheet,
+  Download
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import Purchases from './Purchases';
+import { useAuth } from '../context/AuthContext';
+import BulkImportModal from './BulkImportModal';
 
 export default function Inventory() {
+  const { user, token } = useAuth();
+  const isCashier = user?.role === 'cashier';
   const [products, setProducts] = useState<any[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showBulkModal, setShowBulkModal] = useState(false);
   const [editingProduct, setEditingProduct] = useState<any>(null);
+
   const [newProduct, setNewProduct] = useState({ 
     name: '', 
     barcode: '',
+    hsnCode: '',
+    gstRate: 18,
     costPrice: 0, 
     sellPrice: 0, 
     mrp: 0,
@@ -64,14 +74,17 @@ export default function Inventory() {
     });
   };
   const fetchProducts = () => {
-    fetch('/api/products')
+    fetch('/api/products', {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    })
       .then(res => res.json())
-      .then(data => setProducts(data));
+      .then(data => setProducts(data))
+      .catch(err => console.error('Error fetching products:', err));
   };
 
   useEffect(() => {
     fetchProducts();
-  }, []);
+  }, [token]);
 
   const handleAddProduct = async () => {
     const error = validatePricing();
@@ -83,16 +96,26 @@ export default function Inventory() {
     const url = editingProduct ? `/api/products/${editingProduct.id}` : '/api/products';
     const method = editingProduct ? 'PUT' : 'POST';
     
-    await fetch(url, {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(newProduct)
     });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      alert(err.message || 'Operation failed');
+      return;
+    }
     fetchProducts();
     setShowAddModal(false);
     setNewProduct({ 
       name: '', 
       barcode: '',
+      hsnCode: '',
+      gstRate: 18,
       costPrice: 0, 
       sellPrice: 0, 
       mrp: 0,
@@ -106,8 +129,21 @@ export default function Inventory() {
   };
 
   const handleDeleteProduct = async (id: string) => {
+    if (isCashier) {
+      alert("Permission Denied: Cashiers cannot delete inventory items.");
+      return;
+    }
     if (confirm('Are you sure you want to delete this product?')) {
-      await fetch(`/api/products/${id}`, { method: 'DELETE' });
+      const headers: Record<string, string> = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`/api/products/${id}`, { 
+        method: 'DELETE',
+        headers
+      });
+      if (res.status === 403) {
+        alert("Permission Denied: Cashiers cannot delete inventory items.");
+        return;
+      }
       fetchProducts();
     }
   };
@@ -117,6 +153,8 @@ export default function Inventory() {
     setNewProduct({
       name: product.name,
       barcode: product.barcode || '',
+      hsnCode: product.hsnCode || '',
+      gstRate: product.gstRate !== undefined ? Number(product.gstRate) : 18,
       costPrice: product.costPrice || 0,
       sellPrice: product.sellPrice || product.price || 0,
       mrp: product.mrp || 0,
@@ -138,105 +176,128 @@ export default function Inventory() {
     <div className="space-y-6">
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h2 className="text-3xl font-bold tracking-tight">Inventory Stock</h2>
-          <p className="text-gray-500 text-sm mt-1">Manage your barcodes, pricing, and stock levels.</p>
+          <h2 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">Inventory Stock</h2>
+          <p className="text-slate-500 dark:text-gray-400 text-sm mt-1">Manage barcodes, pricing, stock levels & catalog import.</p>
         </div>
-        <button 
-          onClick={() => {
-            setEditingProduct(null);
-            setNewProduct({ 
-              name: '', 
-              barcode: '',
-              costPrice: 0, 
-              sellPrice: 0, 
-              mrp: 0,
-              discount: 0,
-              discountType: 'amount',
-              stock: 0, 
-              category: 'General',
-              image: ''
-            });
-            setShowAddModal(true);
-          }}
-          className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-2xl font-bold text-sm shadow-lg shadow-blue-900/20 hover:bg-blue-700 transition-all active:scale-95"
-        >
-          <Plus size={18} /> Add New Product
-        </button>
+
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              window.open('/api/products/export', '_blank');
+            }}
+            className="flex items-center gap-2 px-4 py-3 bg-white dark:bg-[#111111] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-gray-300 rounded-2xl font-bold text-xs hover:border-slate-300 dark:hover:border-white/20 transition-all shadow-xs cursor-pointer"
+            title="Download full catalog as CSV"
+          >
+            <Download size={16} /> Export (CSV)
+          </button>
+
+          {!isCashier && (
+            <button
+              onClick={() => setShowBulkModal(true)}
+              className="flex items-center gap-2 px-4 py-3 bg-white dark:bg-[#111111] border border-slate-200 dark:border-white/10 text-slate-700 dark:text-gray-300 rounded-2xl font-bold text-xs hover:border-slate-300 dark:hover:border-white/20 transition-all shadow-xs cursor-pointer"
+              title="Bulk import products from CSV"
+            >
+              <FileSpreadsheet size={16} className="text-emerald-500" /> Bulk Import
+            </button>
+          )}
+
+          <button 
+            onClick={() => {
+              setEditingProduct(null);
+              setNewProduct({ 
+                name: '', 
+                barcode: '',
+                hsnCode: '',
+                gstRate: 18,
+                costPrice: 0, 
+                sellPrice: 0, 
+                mrp: 0,
+                discount: 0,
+                discountType: 'amount',
+                stock: 0, 
+                category: 'General',
+                image: ''
+              });
+              setShowAddModal(true);
+            }}
+            className="flex items-center gap-2 px-6 py-3 bg-blue-600 text-white rounded-2xl font-bold text-sm shadow-lg shadow-blue-900/20 hover:bg-blue-700 transition-all active:scale-95"
+          >
+            <Plus size={18} /> Add New Product
+          </button>
+        </div>
       </div>
 
       <div className="flex items-center gap-4">
         <div className="flex-1 relative group">
-          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-600 group-focus-within:text-blue-500 transition-colors" />
+          <Search size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 group-focus-within:text-blue-500 transition-colors" />
           <input 
             type="text" 
             placeholder="Search by product name or ID..."
-            className="w-full bg-[#0A0A0A] border border-white/5 rounded-2xl pl-12 pr-4 py-3.5 text-sm focus:outline-none focus:border-blue-500/50 transition-all font-medium"
+            className="w-full bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/5 rounded-2xl pl-12 pr-4 py-3.5 text-sm text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-gray-500 focus:outline-none focus:border-blue-500/50 transition-all font-medium shadow-xs dark:shadow-none"
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
           />
         </div>
-        <button className="w-12 h-12 bg-[#0A0A0A] border border-white/5 rounded-2xl flex items-center justify-center text-gray-500 hover:text-white transition-all">
+        <button className="w-12 h-12 bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/5 rounded-2xl flex items-center justify-center text-slate-500 dark:text-gray-500 hover:text-slate-900 dark:hover:text-white transition-all shadow-xs dark:shadow-none cursor-pointer">
           <Filter size={18} />
         </button>
       </div>
 
-      <div className="bg-[#0A0A0A] border border-white/10 rounded-[32px] overflow-x-auto">
+      <div className="bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-[32px] overflow-x-auto shadow-xs dark:shadow-none">
         <table className="w-full min-w-[800px]">
-          <thead className="text-[10px] font-bold text-gray-500 uppercase tracking-widest border-b border-white/5">
+          <thead className="text-[10px] font-bold text-slate-500 dark:text-gray-500 uppercase tracking-widest border-b border-slate-100 dark:border-white/5">
             <tr>
               <th className="px-8 py-5 text-left">Product Details</th>
-              <th className="px-8 py-5 text-left">Category</th>
-              <th className="px-8 py-5 text-left">Last Vendor</th>
-              <th className="px-8 py-5 text-left">Selling Price</th>
-              <th className="px-8 py-5 text-left">Stock Level</th>
+              <th className="px-6 py-5 text-left">Category</th>
+              <th className="px-6 py-5 text-left">HSN/SAC</th>
+              <th className="px-6 py-5 text-left">GST Slab</th>
+              <th className="px-6 py-5 text-left">Selling Price</th>
+              <th className="px-6 py-5 text-left">Stock Level</th>
               <th className="px-8 py-5 text-right whitespace-nowrap">Actions</th>
             </tr>
           </thead>
-          <tbody className="divide-y divide-white/5">
+          <tbody className="divide-y divide-slate-100 dark:divide-white/5">
             {filteredProducts.map((p) => (
-              <tr key={p.id} className="hover:bg-white/[0.02] transition-colors group">
+              <tr key={p.id} className="hover:bg-slate-50 dark:hover:bg-white/[0.02] transition-colors group">
                 <td className="px-8 py-5">
                   <div className="flex items-center gap-4">
                     {p.image ? (
-                      <img src={p.image} className="w-10 h-10 rounded-xl object-cover border border-white/5" alt={p.name} />
+                      <img src={p.image} className="w-10 h-10 rounded-xl object-cover border border-slate-200 dark:border-white/5" alt={p.name} />
                     ) : (
-                      <div className="w-10 h-10 rounded-xl bg-[#111111] flex items-center justify-center text-blue-500 font-bold border border-white/5">
+                      <div className="w-10 h-10 rounded-xl bg-slate-100 dark:bg-[#111111] flex items-center justify-center text-blue-500 font-bold border border-slate-200 dark:border-white/5">
                         {p.name.charAt(0)}
                       </div>
                     )}
                     <div>
-                      <p className="text-sm font-bold text-gray-200">{p.name}</p>
-                      <p className="text-[10px] text-gray-600 font-mono">{p.barcode || `ID: #${p.id.padStart(4, '0')}`}</p>
+                      <p className="text-sm font-bold text-slate-900 dark:text-gray-200">{p.name}</p>
+                      <p className="text-[10px] text-slate-400 dark:text-gray-600 font-mono">{p.barcode || `ID: #${p.id.padStart(4, '0')}`}</p>
                     </div>
                   </div>
                 </td>
-                <td className="px-8 py-5">
-                  <span className="px-3 py-1 bg-[#111111] border border-white/5 rounded-full text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                <td className="px-6 py-5">
+                  <span className="px-3 py-1 bg-slate-100 dark:bg-[#111111] border border-slate-200 dark:border-white/5 rounded-full text-[10px] font-bold text-slate-600 dark:text-gray-400 uppercase tracking-wider">
                     {p.category}
                   </span>
                 </td>
-                <td className="px-8 py-5">
-                  <div className="flex flex-col">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-md bg-orange-500/10 flex items-center justify-center text-orange-500 text-[8px] font-black">
-                         {p.lastVendor?.charAt(0) || 'V'}
-                      </div>
-                      <span className="text-[10px] font-bold text-gray-500">{(p.lastVendor || 'N/A').split(' ')[0]}</span>
-                    </div>
-                    {p.lastPurchasePrice && (
-                      <span className="text-[8px] text-gray-600 mt-1 uppercase tracking-tighter">Cost: ₹{p.lastPurchasePrice}</span>
-                    )}
-                  </div>
+                <td className="px-6 py-5">
+                  <span className="text-xs font-mono font-bold text-slate-600 dark:text-gray-300">
+                    {p.hsnCode || '—'}
+                  </span>
                 </td>
-                <td className="px-8 py-5 font-black text-gray-200">
+                <td className="px-6 py-5">
+                  <span className="px-2.5 py-1 bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 rounded-lg text-xs font-black">
+                    {p.gstRate !== undefined ? p.gstRate : 18}%
+                  </span>
+                </td>
+                <td className="px-6 py-5 font-black text-slate-900 dark:text-gray-200">
                   <div className="flex flex-col">
                     <span>₹{(p.sellPrice || p.price).toLocaleString()}</span>
                     {p.mrp > (p.sellPrice || p.price) && (
-                      <span className="text-[9px] text-gray-600 line-through font-medium">₹{p.mrp}</span>
+                      <span className="text-[9px] text-gray-500 line-through font-medium">₹{p.mrp}</span>
                     )}
                   </div>
                 </td>
-                <td className="px-8 py-5">
+                <td className="px-6 py-5">
                   <div className="flex items-center gap-3">
                     <div className="flex-1 h-1.5 w-24 bg-white/5 rounded-full overflow-hidden">
                       <div 
@@ -350,6 +411,31 @@ export default function Inventory() {
                         onChange={(e) => setNewProduct({...newProduct, barcode: e.target.value})}
                       />
                     </div>
+
+                    <div className="space-y-2 col-span-2 md:col-span-1">
+                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">HSN / SAC Code</label>
+                      <input 
+                        placeholder="e.g. 8517 / 9983"
+                        className="w-full bg-[#111111] border border-white/5 rounded-2xl px-4 py-4 focus:outline-none focus:border-blue-500/50 transition-all font-medium text-white font-mono uppercase"
+                        value={newProduct.hsnCode}
+                        onChange={(e) => setNewProduct({...newProduct, hsnCode: e.target.value})}
+                      />
+                    </div>
+
+                    <div className="space-y-2 col-span-2 md:col-span-1">
+                      <label className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">GST Slab Rate</label>
+                      <select 
+                        className="w-full bg-[#111111] border border-white/5 rounded-2xl px-4 py-4 focus:outline-none focus:border-blue-500/50 transition-all font-medium text-white cursor-pointer"
+                        value={newProduct.gstRate}
+                        onChange={(e) => setNewProduct({...newProduct, gstRate: Number(e.target.value)})}
+                      >
+                        <option value={0}>0% (Nil / Exempt)</option>
+                        <option value={5}>5% (Essential items)</option>
+                        <option value={12}>12% (Standard goods)</option>
+                        <option value={18}>18% (Standard goods/services)</option>
+                        <option value={28}>28% (Luxury / De-merit goods)</option>
+                      </select>
+                    </div>
                   </div>
 
                   {/* Pricing Matrix */}
@@ -394,15 +480,24 @@ export default function Inventory() {
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 pt-4 border-t border-white/5">
-                      <div className="space-y-2">
-                        <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Cost Price (₹)</label>
-                        <input 
-                          type="number"
-                          className="w-full bg-[#0D0D0D] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-red-500/50 transition-all font-bold text-white"
-                          value={newProduct.costPrice}
-                          onChange={(e) => handlePriceChange('costPrice', Number(e.target.value))}
-                        />
-                      </div>
+                      {!isCashier ? (
+                        <div className="space-y-2">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Cost Price (₹)</label>
+                          <input 
+                            type="number"
+                            className="w-full bg-[#0D0D0D] border border-white/10 rounded-xl px-4 py-3 focus:outline-none focus:border-red-500/50 transition-all font-bold text-white"
+                            value={newProduct.costPrice}
+                            onChange={(e) => handlePriceChange('costPrice', Number(e.target.value))}
+                          />
+                        </div>
+                      ) : (
+                        <div className="space-y-2 opacity-50 cursor-not-allowed">
+                          <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Cost Price</label>
+                          <div className="w-full bg-[#0D0D0D] border border-white/10 rounded-xl px-4 py-3 font-mono text-gray-500 text-xs flex items-center">
+                            Restricted (Admin Only)
+                          </div>
+                        </div>
+                      )}
                       <div className="space-y-2">
                         <label className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Initial Stock</label>
                         <input 
@@ -449,6 +544,13 @@ export default function Inventory() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Bulk CSV Import Modal */}
+      <BulkImportModal
+        isOpen={showBulkModal}
+        onClose={() => setShowBulkModal(false)}
+        onSuccess={() => fetchProducts()}
+      />
     </div>
   );
 }

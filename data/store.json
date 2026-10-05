@@ -1,0 +1,59 @@
+{
+  "products": [
+    {
+      "id": "1",
+      "name": "iPhone 15 Pro",
+      "barcode": "6901234567890",
+      "hsnCode": "8517",
+      "gstRate": 18,
+      "costPrice": 85000,
+      "sellPrice": 134900,
+      "mrp": 134900,
+      "discount": 0,
+      "discountType": "amount",
+      "stock": 45,
+      "category": "Electronics",
+      "image": "https://images.unsplash.com/photo-1696446701796-da6122bc1d88?w=100&h=100&fit=crop"
+    },
+    {
+      "id": "2",
+      "name": "Wireless Keyboard",
+      "barcode": "8901234567890",
+      "hsnCode": "8471",
+      "gstRate": 18,
+      "costPrice": 1200,
+      "sellPrice": 2499,
+      "mrp": 2999,
+      "discount": 500,
+      "discountType": "amount",
+      "stock": 12,
+      "category": "Electronics",
+      "image": "https://images.unsplash.com/photo-1511467687858-23d96c32e4ae?w=100&h=100&fit=crop"
+    }
+  ],
+  "parties": [
+    {
+      "id": "P1",
+      "name": "John Doe",
+      "type": "customer",
+      "phone": "9876543210",
+      "balance": 500
+    },
+    {
+      "id": "P2",
+      "name": "Acme Corp",
+      "type": "vendor",
+      "phone": "1234567890",
+      "balance": -1200
+    }
+  ],
+  "transactions": [],
+  "purchases": [],
+  "settings": {
+    "businessName": "Unidex ERP",
+    "upiId": "merchant@upi",
+    "gstNumber": "22AAAAA0000A1Z5",
+    "address": "123 Business Park, Tech City",
+    "phone": "9876543210"
+  }
+}
